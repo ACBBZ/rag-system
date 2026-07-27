@@ -4,7 +4,7 @@ Date: 2026-07-27
 
 ## Goal
 
-Build a production-oriented, multi-tenant RAG system based on the useful parts of `rag-blackbox` and the referenced RAG design article. The system exposes document embedding/update APIs, retrieval APIs, and a generation-layer `rag_chat` API. It uses FastAPI, Postgres, MinIO, and Milvus, without depending on LangChain, LlamaIndex, or similar orchestration frameworks.
+Build a production-oriented, multi-tenant RAG system based on the useful parts of `rag-blackbox` and the referenced RAG design article. The system exposes document embedding/update APIs and a retrieval API. The retrieval API can optionally run agent search, which adds context building and LLM answering on top of retrieved chunks. It uses FastAPI, Postgres, MinIO, and Milvus, without depending on LangChain, LlamaIndex, or similar orchestration frameworks.
 
 The first implementation must support serious multi-tenancy from the start. Tenant identity, knowledge-base scope, storage isolation, metadata filtering, and audit logging are core requirements rather than future extensions.
 
@@ -60,12 +60,10 @@ Client
         -> optional hybrid RRF fusion
         -> optional rerank
         -> structured retrieved chunks
-
-      -> Generation API: rag_chat
-        -> retrieval pipeline
-        -> context builder
-        -> LLM answer
-        -> answer with citations
+        -> optional agent search
+          -> context builder
+          -> LLM answer
+          -> answer with citations
         -> query/audit/feedback logs
 ```
 
@@ -80,8 +78,7 @@ Initial API groups:
 - `POST /v1/documents/embed`: ingest and embed a new document or raw text.
 - `PATCH /v1/documents/{document_id}`: update metadata or replace document content.
 - `DELETE /v1/documents/{document_id}`: soft-delete a document and remove active retrieval visibility.
-- `POST /v1/retrieval/search`: retrieve structured chunks only.
-- `POST /v1/rag/chat`: generation-layer RAG chat endpoint.
+- `POST /v1/retrieval/search`: retrieve structured chunks, optionally with agent search answer generation.
 - `GET /v1/jobs/{job_id}`: inspect ingestion/update job status.
 - `POST /v1/feedback`: store answer feedback.
 - `GET /health`: service health.
@@ -105,12 +102,19 @@ Initial file support:
 - `.md`
 - `.pdf`
 - `.docx`
+- `.csv`
+- `.xlsx`
+- `.xls`
+- `.png`
+- `.jpg`
+- `.jpeg`
+- `.webp`
 
-Parsers are local adapters. They must not rely on LangChain document loaders.
+Table files are converted into row-aware text chunks with sheet name, row range, and column metadata. Embedded tables in PDF and DOCX files should be extracted when the selected parser can do so reliably. Image files are processed through an OCR/vision adapter and stored with extracted text plus image metadata. Parsers are local adapters. They must not rely on LangChain document loaders.
 
 ### Retrieval Layer
 
-Retrieval returns structured candidates and does not call the LLM.
+Retrieval returns structured candidates by default. When `agent_search` is enabled, the same endpoint also builds context and calls the configured LLM to return an answer with citations.
 
 Retrieval stages are individually configurable by server-side tenant defaults and request-level boolean switches:
 
@@ -119,14 +123,15 @@ Retrieval stages are individually configurable by server-side tenant defaults an
 - `full_text_search`
 - `hybrid_search`
 - `rerank`
+- `agent_search`
 
 Request-level switches can disable or enable features, but they cannot override model names, model paths, Milvus connection settings, Postgres DSN, MinIO credentials, or tenant isolation settings.
 
-### Generation Layer
+### Agent Search Layer
 
-The generation layer is exposed through `POST /v1/rag/chat`.
+Agent search is exposed as an optional mode of `POST /v1/retrieval/search`, not as a separate public endpoint.
 
-`rag_chat` owns:
+When enabled, agent search owns:
 
 1. Input validation.
 2. Retrieval pipeline call.
@@ -137,7 +142,7 @@ The generation layer is exposed through `POST /v1/rag/chat`.
 7. Query log persistence.
 8. Response formatting.
 
-`Context Builder -> LLM Answer` is not exposed as separate public APIs in the first implementation. It is an internal part of `rag_chat`.
+`Context Builder -> LLM Answer` is not exposed as a separate public API in the first implementation. It is an internal part of `agent_search` inside `/v1/retrieval/search`.
 
 ## Multi-Tenancy
 
@@ -227,6 +232,7 @@ DEFAULT_VECTOR_SEARCH_ENABLED=true
 DEFAULT_FULL_TEXT_SEARCH_ENABLED=false
 DEFAULT_HYBRID_SEARCH_ENABLED=false
 DEFAULT_RERANK_ENABLED=false
+DEFAULT_AGENT_SEARCH_ENABLED=false
 ```
 
 API callers may pass retrieval options, but not model paths or credentials.
@@ -290,6 +296,7 @@ Request:
     "full_text_search": true,
     "hybrid_search": true,
     "rerank": true,
+    "agent_search": false,
     "top_k": 20,
     "final_k": 5
   },
@@ -320,43 +327,33 @@ Response:
       },
       "metadata": {}
     }
-  ]
+  ],
+  "answer": null,
+  "citations": []
 }
 ```
 
-### RAG Chat
-
-`POST /v1/rag/chat`
-
-Request:
-
-```json
-{
-  "knowledge_base_id": "kb_...",
-  "message": "问题",
-  "conversation_id": "conv_...",
-  "options": {
-    "query_rewrite": true,
-    "vector_search": true,
-    "full_text_search": true,
-    "hybrid_search": true,
-    "rerank": true,
-    "top_k": 20,
-    "final_k": 5
-  },
-  "filters": {
-    "document_ids": [],
-    "metadata": {}
-  }
-}
-```
-
-Response:
+When `options.agent_search=true`, the same endpoint returns generated answer fields:
 
 ```json
 {
   "query_id": "qry_...",
   "answer": "...",
+  "chunks": [
+    {
+      "chunk_id": "chk_...",
+      "document_id": "doc_...",
+      "text": "...",
+      "score": 0.91,
+      "retrieval_method": "hybrid_rerank",
+      "source": {
+        "title": "...",
+        "source_uri": "...",
+        "page": 3
+      },
+      "metadata": {}
+    }
+  ],
   "citations": [
     {
       "chunk_id": "chk_...",
@@ -429,6 +426,10 @@ When vector and full-text search are both enabled and `hybrid_search` is true, m
 
 When enabled, rerank candidates using a configured rerank adapter. If rerank fails, return the fused candidates and log the error.
 
+### Agent Search
+
+When enabled, agent search converts final retrieved chunks into a bounded context, calls the configured LLM, and maps answer citations back to chunk IDs. If agent search fails after successful retrieval, the endpoint returns a typed LLM failure rather than silently returning only chunks, because callers explicitly requested answer generation.
+
 ## Error Handling
 
 Errors should be explicit and typed:
@@ -493,7 +494,7 @@ Contract tests:
 - `/v1/documents/embed`
 - `/v1/documents/{document_id}`
 - `/v1/retrieval/search`
-- `/v1/rag/chat`
+- `/v1/retrieval/search` with `agent_search=true`
 
 ## Initial Implementation Scope
 
@@ -506,9 +507,9 @@ The first build should deliver:
 - API-key tenant resolution.
 - Document embed API.
 - Document update API.
-- Retrieval API with optional stages.
-- `rag_chat` API with internal context builder and LLM adapter.
-- Local parser adapters for `.txt`, `.md`, `.pdf`, `.docx`.
+- Retrieval API with optional stages, including `agent_search`.
+- Agent search mode with internal context builder and LLM adapter.
+- Local parser adapters for `.txt`, `.md`, `.pdf`, `.docx`, `.csv`, `.xlsx`, `.xls`, `.png`, `.jpg`, `.jpeg`, and `.webp`.
 - Unit and API tests for the critical flow.
 
 ## Fixed Provider Defaults
