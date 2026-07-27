@@ -11,7 +11,7 @@ The first implementation must support serious multi-tenancy from the start. Tena
 ## Non-Goals
 
 - No LangChain or LlamaIndex dependency.
-- No model paths or infrastructure credentials in API request bodies.
+- No model URLs, model names, API keys, or infrastructure credentials in API request bodies.
 - No frontend in the first implementation.
 - No OpenSearch in the first implementation.
 - No agent framework or graph orchestration in the first implementation.
@@ -24,7 +24,7 @@ The first implementation must support serious multi-tenancy from the start. Tena
 - Chroma-based vector search.
 - BM25-based full-text search.
 - RRF fusion.
-- CrossEncoder rerank.
+- rerank.
 
 The current implementation is useful as a behavior reference, but it is not production-ready because retrieval returns mostly raw strings, BM25 is rebuilt from all Chroma documents at query time, metadata is weak, model settings are exposed in request payloads, and there is no multi-tenant isolation, citation model, ingestion job state, or evaluation loop.
 
@@ -78,6 +78,7 @@ Initial API groups:
 - `POST /v1/documents/embed`: ingest and embed a new document or raw text.
 - `PATCH /v1/documents/{document_id}`: update metadata or replace document content.
 - `DELETE /v1/documents/{document_id}`: soft-delete a document and remove active retrieval visibility.
+- `DELETE /v1/documents/{document_id}/purge`: permanently delete a document, its versions, chunks, vectors, keyword index rows, and stored objects.
 - `POST /v1/retrieval/search`: retrieve structured chunks, optionally with agent search answer generation.
 - `GET /v1/jobs/{job_id}`: inspect ingestion/update job status.
 - `POST /v1/feedback`: store answer feedback.
@@ -125,7 +126,7 @@ Retrieval stages are individually configurable by server-side tenant defaults an
 - `rerank`
 - `agent_search`
 
-Request-level switches can disable or enable features, but they cannot override model names, model paths, Milvus connection settings, Postgres DSN, MinIO credentials, or tenant isolation settings.
+Request-level switches can disable or enable features, but they cannot override model URLs, model names, API keys, Milvus connection settings, Postgres DSN, MinIO credentials, or tenant isolation settings.
 
 ### Agent Search Layer
 
@@ -192,6 +193,8 @@ Document updates create new versions. Only one version is active for retrieval b
 
 Soft delete marks documents and chunks inactive in Postgres, deletes or tombstones vectors in Milvus, and keeps MinIO objects until retention rules remove them.
 
+Hard delete is exposed through `DELETE /v1/documents/{document_id}/purge`. It is irreversible and requires an admin-capable scope for the tenant and knowledge base. Hard delete removes document rows, document version rows, chunk rows, keyword index rows, Milvus vectors, and all MinIO raw/parsed objects for the document. The system may keep a minimal deletion audit event containing tenant ID, knowledge-base ID, document ID, actor, and timestamp, but it must not retain document content or extracted text after purge completes.
+
 ### Tenant Defaults
 
 Tenant and knowledge-base defaults live in Postgres and `.env` controlled server config:
@@ -200,7 +203,7 @@ Tenant and knowledge-base defaults live in Postgres and `.env` controlled server
 - max upload size
 - max chunks per document
 - top-k limits
-- allowed models
+- allowed retrieval features
 - retention policy
 
 ## Configuration
@@ -215,18 +218,18 @@ MINIO_ENDPOINT=
 MINIO_ACCESS_KEY=
 MINIO_SECRET_KEY=
 MILVUS_URI=
-EMBEDDING_PROVIDER=sentence_transformers
+EMBEDDING_URL=
 EMBEDDING_MODEL=
-EMBEDDING_DEVICE=cpu
-RERANK_PROVIDER=sentence_transformers
+EMBEDDING_API_KEY=
+RERANK_URL=
 RERANK_MODEL=
-RERANK_DEVICE=cpu
-QUERY_REWRITE_PROVIDER=openai_compatible
+RERANK_API_KEY=
+QUERY_REWRITE_URL=
 QUERY_REWRITE_MODEL=
-LLM_PROVIDER=openai_compatible
+QUERY_REWRITE_API_KEY=
+LLM_URL=
 LLM_MODEL=
-OPENAI_COMPATIBLE_BASE_URL=
-OPENAI_COMPATIBLE_API_KEY=
+LLM_API_KEY=
 DEFAULT_QUERY_REWRITE_ENABLED=false
 DEFAULT_VECTOR_SEARCH_ENABLED=true
 DEFAULT_FULL_TEXT_SEARCH_ENABLED=false
@@ -235,7 +238,7 @@ DEFAULT_RERANK_ENABLED=false
 DEFAULT_AGENT_SEARCH_ENABLED=false
 ```
 
-API callers may pass retrieval options, but not model paths or credentials.
+API callers may pass retrieval options, but not model URLs, model names, API keys, infrastructure settings, or credentials.
 
 ## API Contracts
 
@@ -277,6 +280,21 @@ Response:
   "document_id": "doc_...",
   "version": 2,
   "status": "queued"
+}
+```
+
+### Hard Delete Document
+
+`DELETE /v1/documents/{document_id}/purge`
+
+Permanently deletes the document and all indexed content for the resolved tenant and knowledge base. This requires an admin-capable scope and must be idempotent: a repeated purge for the same document returns a successful deleted state when the document is already gone within that tenant scope.
+
+Response:
+
+```json
+{
+  "document_id": "doc_...",
+  "status": "purged"
 }
 ```
 
@@ -392,6 +410,7 @@ Core tables:
 - `query_logs`
 - `retrieval_logs`
 - `feedback`
+- `deletion_audit_events`
 
 All tenant-owned tables include:
 
@@ -408,7 +427,7 @@ Primary retrieval tables also include:
 
 ### Query Rewrite
 
-When enabled, rewrite should produce one canonical query and optionally expansions. The first implementation can use a simple LLM prompt behind an adapter. If rewrite fails, retrieval falls back to the original query and logs the failure.
+When enabled, rewrite should produce one canonical query and optionally expansions. The first implementation calls the configured query rewrite URL with the configured model name and API key. If rewrite fails, retrieval falls back to the original query and logs the failure.
 
 ### Vector Search
 
@@ -424,7 +443,7 @@ When vector and full-text search are both enabled and `hybrid_search` is true, m
 
 ### Rerank
 
-When enabled, rerank candidates using a configured rerank adapter. If rerank fails, return the fused candidates and log the error.
+When enabled, rerank candidates by calling the configured rerank URL with the configured model name and API key. If rerank fails, return the fused candidates and log the error.
 
 ### Agent Search
 
@@ -493,6 +512,7 @@ Contract tests:
 
 - `/v1/documents/embed`
 - `/v1/documents/{document_id}`
+- `/v1/documents/{document_id}/purge`
 - `/v1/retrieval/search`
 - `/v1/retrieval/search` with `agent_search=true`
 
@@ -507,19 +527,20 @@ The first build should deliver:
 - API-key tenant resolution.
 - Document embed API.
 - Document update API.
+- Document hard delete API.
 - Retrieval API with optional stages, including `agent_search`.
-- Agent search mode with internal context builder and LLM adapter.
+- Agent search mode with internal context builder and remote LLM endpoint client.
 - Local parser adapters for `.txt`, `.md`, `.pdf`, `.docx`, `.csv`, `.xlsx`, `.xls`, `.png`, `.jpg`, `.jpeg`, and `.webp`.
 - Unit and API tests for the critical flow.
 
-## Fixed Provider Defaults
+## Model Endpoint Configuration
 
-The first implementation uses explicit provider defaults while keeping model values in `.env`:
+The first implementation uses explicit remote model endpoint configuration. Each model-backed capability is configured with a URL, model name, and API key in `.env`:
 
-- Embedding provider: local `sentence_transformers` adapter.
-- Rerank provider: local `sentence_transformers` CrossEncoder adapter.
-- Query rewrite provider: OpenAI-compatible chat-completions HTTP adapter.
-- LLM answer provider: OpenAI-compatible chat-completions HTTP adapter.
+- Embedding: `EMBEDDING_URL`, `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`.
+- Rerank: `RERANK_URL`, `RERANK_MODEL`, `RERANK_API_KEY`.
+- Query rewrite: `QUERY_REWRITE_URL`, `QUERY_REWRITE_MODEL`, `QUERY_REWRITE_API_KEY`.
+- LLM answer: `LLM_URL`, `LLM_MODEL`, `LLM_API_KEY`.
 - Milvus layout: one collection with scalar tenant and knowledge-base filters.
 
-Tests can use deterministic fake adapters, but production code must load provider settings from `.env` and must not accept model settings from API request bodies.
+Tests can use deterministic fake endpoint clients, but production code must load model endpoint settings from `.env` and must not accept model URLs, model names, API keys, or provider settings from API request bodies.
