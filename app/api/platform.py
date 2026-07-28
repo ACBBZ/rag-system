@@ -15,12 +15,10 @@ from rag.schemas import (
     CreateTenantResponse,
     TenantSummary,
     UserSummary,
-    VectorMigrationSummary,
     VectorResourceSummary,
 )
 from rag.storage.milvus_collection_manager import MilvusCollectionManager
 from rag.storage.tenant_provisioning_repository import TenantProvisioningRepository
-from rag.storage.vector_migration import TenantVectorMigrationService, VectorMigrationRepository
 from rag.storage.vector_resources import VectorResourceRepository
 from rag.tenants.provisioning import TenantProvisioningService
 
@@ -32,31 +30,14 @@ class RetryVectorResourceResponse(BaseModel):
     api_key: ApiKeyCreated | None = None
 
 
-def _milvus_components():
+def _provisioning_service(session: AsyncSession) -> TenantProvisioningService:
     settings = get_settings()
     client = MilvusClient(uri=settings.milvus_uri)
     manager = MilvusCollectionManager(client, settings)
-    return settings, client, manager
-
-
-def _provisioning_service(session: AsyncSession) -> TenantProvisioningService:
-    settings, _client, manager = _milvus_components()
     return TenantProvisioningService(
         session=session,
         management_repository=TenantProvisioningRepository(session, settings),
         vector_repository=VectorResourceRepository(session, settings),
-        collection_manager=manager,
-    )
-
-
-def _migration_service(session: AsyncSession) -> TenantVectorMigrationService:
-    settings, client, manager = _milvus_components()
-    return TenantVectorMigrationService(
-        session=session,
-        settings=settings,
-        client=client,
-        vector_repository=VectorResourceRepository(session, settings),
-        migration_repository=VectorMigrationRepository(session),
         collection_manager=manager,
     )
 
@@ -98,7 +79,7 @@ async def get_vector_resource(
     _platform_key: Annotated[str, Depends(get_platform_api_key)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> VectorResourceSummary:
-    resource = await VectorResourceRepository(session, get_settings()).get_latest(tenant_id)
+    resource = await VectorResourceRepository(session, get_settings()).get(tenant_id)
     if resource is None:
         raise NotFoundError("tenant vector resource not found")
     return VectorResourceSummary(**resource.to_summary())
@@ -118,31 +99,3 @@ async def retry_vector_resource(
         vector_resource=VectorResourceSummary(**result.vector_resource.to_summary()),
         api_key=ApiKeyCreated(**result.api_key) if result.api_key else None,
     )
-
-
-@router.get(
-    "/tenants/{tenant_id}/vector-migration",
-    response_model=VectorMigrationSummary,
-)
-async def get_vector_migration(
-    tenant_id: str,
-    _platform_key: Annotated[str, Depends(get_platform_api_key)],
-    session: Annotated[AsyncSession, Depends(get_session)],
-) -> VectorMigrationSummary:
-    migration = await VectorMigrationRepository(session).get(tenant_id)
-    if migration is None:
-        raise NotFoundError("tenant vector migration not found")
-    return VectorMigrationSummary(**migration)
-
-
-@router.post(
-    "/tenants/{tenant_id}/vector-migration",
-    response_model=VectorMigrationSummary,
-)
-async def migrate_tenant_vectors(
-    tenant_id: str,
-    _platform_key: Annotated[str, Depends(get_platform_api_key)],
-    session: Annotated[AsyncSession, Depends(get_session)],
-) -> VectorMigrationSummary:
-    migration = await _migration_service(session).backfill_tenant(tenant_id)
-    return VectorMigrationSummary(**migration)
