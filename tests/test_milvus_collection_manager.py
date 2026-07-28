@@ -113,6 +113,17 @@ def test_ensure_collection_creates_collection_and_alias():
     assert client.created_aliases == [("rag_t_a_v1", "rag_t_a_current")]
 
 
+def test_ensure_physical_collection_does_not_activate_alias():
+    client = FakeMilvusClient()
+    manager = MilvusCollectionManager(client, settings())
+
+    manager.ensure_physical_collection(resource())
+
+    assert [item[0] for item in client.created] == ["rag_t_a_v1"]
+    assert client.created_aliases == []
+    assert client.altered_aliases == []
+
+
 def test_ensure_collection_is_idempotent():
     client = FakeMilvusClient()
     manager = MilvusCollectionManager(client, settings())
