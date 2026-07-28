@@ -1,6 +1,7 @@
 import pytest
 
 from rag.config import Settings
+from rag.errors import NotFoundError
 from rag.storage.vector_migration import TenantVectorMigrationService
 from rag.storage.vector_resources import TenantVectorResource
 
@@ -44,7 +45,8 @@ class FakeMilvusClient:
 
 
 class FakeVectorRepository:
-    def __init__(self):
+    def __init__(self, *, exists=True):
+        self.exists = exists
         self.resource = TenantVectorResource(
             id="vec_1",
             tenant_id="ten_a",
@@ -61,6 +63,9 @@ class FakeVectorRepository:
             read_mode="shared",
         )
         self.events = []
+
+    async def tenant_exists(self, tenant_id):
+        return self.exists
 
     async def get_latest(self, tenant_id):
         return self.resource
@@ -164,6 +169,24 @@ def migration_row():
         "chunk_id": "chk_1",
         "is_active": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_unknown_tenant_is_rejected_before_collection_creation():
+    manager = FakeCollectionManager()
+    service = TenantVectorMigrationService(
+        session=FakeSession(),
+        settings=settings(),
+        client=FakeMilvusClient([]),
+        vector_repository=FakeVectorRepository(exists=False),
+        migration_repository=FakeMigrationRepository(),
+        collection_manager=manager,
+    )
+
+    with pytest.raises(NotFoundError, match="tenant not found"):
+        await service.backfill_tenant("ten_missing")
+
+    assert manager.events == []
 
 
 @pytest.mark.asyncio
