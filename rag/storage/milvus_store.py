@@ -39,6 +39,7 @@ class MilvusVectorStore:
     def _resolve(self, tenant: TenantContext) -> TenantVectorRoute:
         route = self.resolver.resolve(tenant)
         _safe_collection_name(route.collection_name)
+        _safe_collection_name(route.physical_collection)
         return route
 
     async def upsert_chunks(
@@ -57,9 +58,9 @@ class MilvusVectorStore:
             invalid = [len(vector) for vector in vectors if len(vector) != route.embedding_dimension]
             if invalid:
                 raise ValueError("embedding dimension does not match tenant collection")
-        rows = []
-        for chunk_id, vector in zip(chunk_ids, vectors, strict=True):
-            row = {
+
+        base_rows = [
+            {
                 "id": chunk_id,
                 "vector": vector,
                 "tenant_id": tenant.tenant_id,
@@ -68,10 +69,21 @@ class MilvusVectorStore:
                 "chunk_id": chunk_id,
                 "is_active": True,
             }
-            if route.mode == "tenant_collection":
-                row["document_version"] = 1
-            rows.append(row)
-        self.client.upsert(collection_name=route.collection_name, data=rows)
+            for chunk_id, vector in zip(chunk_ids, vectors, strict=True)
+        ]
+        if route.mode == "shared":
+            self.client.upsert(collection_name=route.collection_name, data=base_rows)
+            return
+        if route.mode == "dual_write":
+            self.client.upsert(collection_name=route.collection_name, data=base_rows)
+            target_rows = [dict(row, document_version=1) for row in base_rows]
+            self.client.upsert(
+                collection_name=route.physical_collection,
+                data=target_rows,
+            )
+            return
+        tenant_rows = [dict(row, document_version=1) for row in base_rows]
+        self.client.upsert(collection_name=route.collection_name, data=tenant_rows)
 
     async def search(
         self,
@@ -131,11 +143,17 @@ class MilvusVectorStore:
         safe_tenant_id = _safe_filter_id(tenant.tenant_id, "tenant_id")
         safe_kb_id = _safe_filter_id(knowledge_base_id, "knowledge_base_id")
         safe_document_id = _safe_filter_id(document_id, "document_id")
+        filter_expr = (
+            f'tenant_id == "{safe_tenant_id}" and '
+            f'knowledge_base_id == "{safe_kb_id}" and '
+            f'document_id == "{safe_document_id}"'
+        )
         self.client.delete(
             collection_name=route.collection_name,
-            filter=(
-                f'tenant_id == "{safe_tenant_id}" and '
-                f'knowledge_base_id == "{safe_kb_id}" and '
-                f'document_id == "{safe_document_id}"'
-            ),
+            filter=filter_expr,
         )
+        if route.mode == "dual_write":
+            self.client.delete(
+                collection_name=route.physical_collection,
+                filter=filter_expr,
+            )
