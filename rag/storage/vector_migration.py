@@ -153,6 +153,9 @@ class TenantVectorMigrationService:
             raise ServiceUnavailableError("legacy Milvus collection is not configured")
         source_collection = _safe_collection_name(configured_source)
 
+        if not await self.vector_repository.tenant_exists(tenant_id):
+            raise NotFoundError("tenant not found")
+
         resource = await self.vector_repository.get_latest(tenant_id)
         if resource is None:
             resource = await self.vector_repository.create_pending(
