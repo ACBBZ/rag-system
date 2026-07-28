@@ -1,3 +1,4 @@
+import asyncio
 import re
 
 from pymilvus import MilvusClient
@@ -72,18 +73,31 @@ class MilvusVectorStore:
             for chunk_id, vector in zip(chunk_ids, vectors, strict=True)
         ]
         if route.mode == "shared":
-            self.client.upsert(collection_name=route.collection_name, data=base_rows)
+            await asyncio.to_thread(
+                self.client.upsert,
+                collection_name=route.collection_name,
+                data=base_rows,
+            )
             return
         if route.mode == "dual_write":
-            self.client.upsert(collection_name=route.collection_name, data=base_rows)
+            await asyncio.to_thread(
+                self.client.upsert,
+                collection_name=route.collection_name,
+                data=base_rows,
+            )
             target_rows = [dict(row, document_version=1) for row in base_rows]
-            self.client.upsert(
+            await asyncio.to_thread(
+                self.client.upsert,
                 collection_name=route.physical_collection,
                 data=target_rows,
             )
             return
         tenant_rows = [dict(row, document_version=1) for row in base_rows]
-        self.client.upsert(collection_name=route.collection_name, data=tenant_rows)
+        await asyncio.to_thread(
+            self.client.upsert,
+            collection_name=route.collection_name,
+            data=tenant_rows,
+        )
 
     async def search(
         self,
@@ -109,7 +123,8 @@ class MilvusVectorStore:
             search_params["params"] = {
                 "ef": max(self.settings.milvus_search_ef, top_k)
             }
-        results = self.client.search(
+        results = await asyncio.to_thread(
+            self.client.search,
             collection_name=route.collection_name,
             data=[query_vector],
             limit=top_k,
@@ -148,12 +163,14 @@ class MilvusVectorStore:
             f'knowledge_base_id == "{safe_kb_id}" and '
             f'document_id == "{safe_document_id}"'
         )
-        self.client.delete(
+        await asyncio.to_thread(
+            self.client.delete,
             collection_name=route.collection_name,
             filter=filter_expr,
         )
         if route.mode == "dual_write":
-            self.client.delete(
+            await asyncio.to_thread(
+                self.client.delete,
                 collection_name=route.physical_collection,
                 filter=filter_expr,
             )
