@@ -1,6 +1,16 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+
+class TenantVectorRoute(BaseModel):
+    collection_name: str
+    physical_collection: str
+    mode: Literal["shared", "tenant_collection"]
+    schema_version: int
+    embedding_model: str
+    embedding_dimension: int
 
 
 class TenantContext(BaseModel):
@@ -15,6 +25,7 @@ class TenantContext(BaseModel):
     knowledge_base_ids: list[str] = Field(default_factory=list)
     roles: list[str] = Field(default_factory=list)
     allowed_scopes: list[str] = Field(default_factory=list)
+    vector_route: TenantVectorRoute | None = None
 
     def can_access_knowledge_base(self, knowledge_base_id: str) -> bool:
         if self.knowledge_base_limit is not None:
@@ -51,6 +62,33 @@ class ApiKeyCreated(BaseModel):
     expires_at: datetime | None = None
 
 
+class VectorResourceSummary(BaseModel):
+    id: str
+    tenant_id: str
+    logical_alias: str
+    physical_collection: str
+    schema_version: int
+    embedding_model: str
+    embedding_dimension: int
+    metric_type: str
+    index_type: str
+    status: str
+    read_mode: str
+    last_error: str | None = None
+    activated_at: datetime | None = None
+
+
+class VectorMigrationSummary(BaseModel):
+    id: str
+    tenant_id: str
+    source_collection: str
+    target_collection: str
+    migrated_count: int
+    failed_count: int
+    status: str
+    last_error: str | None = None
+
+
 class CreateTenantRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,62}$")
@@ -64,6 +102,7 @@ class CreateTenantResponse(BaseModel):
     owner: UserSummary
     knowledge_base_id: str | None = None
     api_key: ApiKeyCreated
+    vector_resource: VectorResourceSummary | None = None
 
 
 class CreateUserRequest(BaseModel):
