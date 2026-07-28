@@ -83,6 +83,7 @@ class VectorMigrationSummary(BaseModel):
     tenant_id: str
     source_collection: str
     target_collection: str
+    last_chunk_id: str | None = None
     migrated_count: int
     failed_count: int
     status: str
