@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag.config import Settings
 from rag.errors import NotFoundError, ServiceUnavailableError
-from rag.storage.milvus_store import _safe_filter_id
+from rag.storage.milvus_store import _safe_collection_name, _safe_filter_id
 
 
 class VectorMigrationRepository:
@@ -71,7 +71,8 @@ class VectorMigrationRepository:
             text(
                 """
                 update tenant_vector_migrations
-                set status = 'running', last_error = null, updated_at = now()
+                set status = 'running', migrated_count = 0, last_chunk_id = null,
+                    last_error = null, updated_at = now()
                 where id = :id
                 """
             ),
@@ -147,7 +148,9 @@ class TenantVectorMigrationService:
 
     async def backfill_tenant(self, tenant_id: str) -> dict[str, object]:
         safe_tenant_id = _safe_filter_id(tenant_id, "tenant_id")
-        source_collection = self.settings.legacy_milvus_collection
+        source_collection = _safe_collection_name(
+            self.settings.legacy_milvus_collection
+        )
         if not source_collection:
             raise ServiceUnavailableError("legacy Milvus collection is not configured")
 
@@ -159,7 +162,11 @@ class TenantVectorMigrationService:
             )
             await self.session.commit()
 
-        await asyncio.to_thread(self.collection_manager.ensure_collection, resource)
+        _safe_collection_name(resource.physical_collection)
+        await asyncio.to_thread(
+            self.collection_manager.ensure_physical_collection,
+            resource,
+        )
         migration = await self.migration_repository.get_or_create(
             tenant_id,
             source_collection,
@@ -167,6 +174,7 @@ class TenantVectorMigrationService:
         )
         migration_id = str(migration["id"])
         if migration.get("status") == "completed":
+            await asyncio.to_thread(self.collection_manager.activate_alias, resource)
             await self.vector_repository.activate_read_mode(resource.id)
             await self.session.commit()
             return migration
@@ -175,19 +183,13 @@ class TenantVectorMigrationService:
         await self.migration_repository.mark_running(migration_id)
         await self.session.commit()
 
-        filter_expr = f'tenant_id == "{safe_tenant_id}"'
-        last_chunk_id = migration.get("last_chunk_id")
-        if last_chunk_id:
-            safe_last_chunk_id = _safe_filter_id(str(last_chunk_id), "last_chunk_id")
-            filter_expr += f' and id > "{safe_last_chunk_id}"'
-
         iterator = None
         try:
             iterator = await asyncio.to_thread(
                 self.client.query_iterator,
                 collection_name=source_collection,
                 batch_size=self.settings.milvus_migration_batch_size,
-                filter=filter_expr,
+                filter=f'tenant_id == "{safe_tenant_id}"',
                 output_fields=[
                     "id",
                     "vector",
@@ -202,7 +204,14 @@ class TenantVectorMigrationService:
                 batch = await asyncio.to_thread(iterator.next)
                 if not batch:
                     break
-                rows = [self._normalize_row(item, safe_tenant_id) for item in batch]
+                rows = [
+                    self._normalize_row(
+                        item,
+                        safe_tenant_id,
+                        resource.embedding_dimension,
+                    )
+                    for item in batch
+                ]
                 await asyncio.to_thread(
                     self.client.upsert,
                     collection_name=resource.physical_collection,
@@ -216,6 +225,7 @@ class TenantVectorMigrationService:
                 )
                 await self.session.commit()
 
+            await asyncio.to_thread(self.collection_manager.activate_alias, resource)
             await self.migration_repository.mark_completed(migration_id)
             await self.vector_repository.activate_read_mode(resource.id)
             await self.session.commit()
@@ -235,7 +245,11 @@ class TenantVectorMigrationService:
         return completed
 
     @staticmethod
-    def _normalize_row(item, tenant_id: str) -> dict[str, object]:
+    def _normalize_row(
+        item,
+        tenant_id: str,
+        expected_dimension: int,
+    ) -> dict[str, object]:
         if isinstance(item, dict):
             row = dict(item)
         elif hasattr(item, "to_dict"):
@@ -257,6 +271,10 @@ class TenantVectorMigrationService:
             raise ValueError(
                 "migration row is missing fields: " + ", ".join(sorted(missing))
             )
+        vector = row["vector"]
+        if not isinstance(vector, (list, tuple)) or len(vector) != expected_dimension:
+            raise ValueError("embedding dimension does not match tenant collection")
+        row["vector"] = list(vector)
         row["document_version"] = int(row.get("document_version", 1))
         row["is_active"] = bool(row.get("is_active", True))
         return row
