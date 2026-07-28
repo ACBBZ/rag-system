@@ -1,5 +1,3 @@
-from dataclasses import replace
-
 import pytest
 
 from rag.config import Settings
@@ -21,7 +19,6 @@ class FakeMilvusClient:
         self.aliases = {}
         self.created = []
         self.created_aliases = []
-        self.altered_aliases = []
 
     def has_collection(self, collection_name):
         return collection_name in self.collections
@@ -58,9 +55,11 @@ class FakeMilvusClient:
         self.created_aliases.append((collection_name, alias))
         self.aliases[alias] = collection_name
 
-    def alter_alias(self, collection_name, alias):
-        self.altered_aliases.append((collection_name, alias))
-        self.aliases[alias] = collection_name
+    def drop_alias(self, alias):
+        self.aliases.pop(alias, None)
+
+    def drop_collection(self, collection_name):
+        self.collections.pop(collection_name, None)
 
 
 def settings() -> Settings:
@@ -97,9 +96,9 @@ def resource() -> TenantVectorResource:
         metric_type="COSINE",
         index_type="HNSW",
         index_params={"M": 16, "efConstruction": 200},
+        search_params={"ef": 64},
         schema_fingerprint="fingerprint",
         status="pending",
-        read_mode="tenant_collection",
     )
 
 
@@ -113,17 +112,6 @@ def test_ensure_collection_creates_collection_and_alias():
     assert client.created_aliases == [("rag_t_a_v1", "rag_t_a_current")]
 
 
-def test_ensure_physical_collection_does_not_activate_alias():
-    client = FakeMilvusClient()
-    manager = MilvusCollectionManager(client, settings())
-
-    manager.ensure_physical_collection(resource())
-
-    assert [item[0] for item in client.created] == ["rag_t_a_v1"]
-    assert client.created_aliases == []
-    assert client.altered_aliases == []
-
-
 def test_ensure_collection_is_idempotent():
     client = FakeMilvusClient()
     manager = MilvusCollectionManager(client, settings())
@@ -133,19 +121,17 @@ def test_ensure_collection_is_idempotent():
 
     assert len(client.created) == 1
     assert len(client.created_aliases) == 1
-    assert client.altered_aliases == []
 
 
-def test_existing_alias_is_reassigned_to_new_collection():
+def test_existing_alias_pointing_elsewhere_is_rejected():
     client = FakeMilvusClient()
-    old = resource()
+    client.aliases["rag_t_a_current"] = "unexpected_collection"
     manager = MilvusCollectionManager(client, settings())
-    manager.ensure_collection(old)
 
-    upgraded = replace(old, physical_collection="rag_t_a_v2", schema_version=2)
-    manager.ensure_collection(upgraded)
+    with pytest.raises(ValueError, match="unexpected collection"):
+        manager.ensure_collection(resource())
 
-    assert client.altered_aliases == [("rag_t_a_v2", "rag_t_a_current")]
+    assert client.aliases["rag_t_a_current"] == "unexpected_collection"
 
 
 def test_existing_collection_with_wrong_dimension_is_rejected():
