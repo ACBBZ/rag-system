@@ -54,7 +54,7 @@ class VectorMigrationRepository:
             text(
                 """
                 select id, tenant_id, source_collection, target_collection,
-                       migrated_count, failed_count, status, last_error
+                       last_chunk_id, migrated_count, failed_count, status, last_error
                 from tenant_vector_migrations
                 where tenant_id = :tenant_id
                 order by created_at desc
@@ -166,9 +166,20 @@ class TenantVectorMigrationService:
             resource.physical_collection,
         )
         migration_id = str(migration["id"])
+        if migration.get("status") == "completed":
+            await self.vector_repository.activate_read_mode(resource.id)
+            await self.session.commit()
+            return migration
+
         await self.vector_repository.mark_migrating(resource.id)
         await self.migration_repository.mark_running(migration_id)
         await self.session.commit()
+
+        filter_expr = f'tenant_id == "{safe_tenant_id}"'
+        last_chunk_id = migration.get("last_chunk_id")
+        if last_chunk_id:
+            safe_last_chunk_id = _safe_filter_id(str(last_chunk_id), "last_chunk_id")
+            filter_expr += f' and id > "{safe_last_chunk_id}"'
 
         iterator = None
         try:
@@ -176,7 +187,7 @@ class TenantVectorMigrationService:
                 self.client.query_iterator,
                 collection_name=source_collection,
                 batch_size=self.settings.milvus_migration_batch_size,
-                filter=f'tenant_id == "{safe_tenant_id}"',
+                filter=filter_expr,
                 output_fields=[
                     "id",
                     "vector",
