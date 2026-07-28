@@ -1,102 +1,139 @@
-# Authorization V2 and Tenant Vector API Guide
+# Authorization V2 and Fixed V1 Tenant Collections
 
 ## Required configuration
 
-Set `API_KEY_PEPPER` to a long random secret and `PLATFORM_API_KEY` to a separate platform-control credential. Apply Alembic revisions through `0004_vector_alias_versions` before creating or migrating tenants.
+Set `API_KEY_PEPPER` to a long random secret and `PLATFORM_API_KEY` to a separate platform-control credential. Apply Alembic revisions through `0003_tenant_vector_collections` before creating tenants.
 
 Configure Milvus with:
 
 ```env
 MILVUS_URI=http://localhost:19530
 MILVUS_COLLECTION_PREFIX=rag_prod
-MILVUS_LEGACY_COLLECTION=rag_chunks
-MILVUS_SCHEMA_VERSION=1
 MILVUS_VECTOR_DIMENSION=1024
 MILVUS_METRIC_TYPE=COSINE
 MILVUS_INDEX_TYPE=HNSW
 MILVUS_INDEX_M=16
 MILVUS_INDEX_EF_CONSTRUCTION=200
 MILVUS_SEARCH_EF=64
-MILVUS_MIGRATION_BATCH_SIZE=500
 ```
 
-`MILVUS_VECTOR_DIMENSION` must match the output dimension of `EMBEDDING_MODEL`. Changing the embedding model or dimension requires a new schema version and physical collection.
+`MILVUS_VECTOR_DIMENSION` must exactly match the output dimension of `EMBEDDING_MODEL`.
 
-## Tenant collections
+After the first tenant Collection is created, treat the embedding model, vector dimension, metric, index settings, search settings, and field schema as immutable for V1. A configuration fingerprint mismatch makes the tenant vector route unavailable instead of querying incompatible vectors.
 
-Each newly created tenant receives:
+## Tenant Collection model
 
-- a server-generated stable alias such as `rag_prod_t_<digest>_current`;
-- a versioned physical collection such as `rag_prod_t_<digest>_v1`;
-- a `tenant_vector_resources` database record containing the schema, model, index, lifecycle status, and current read mode.
+Each tenant receives exactly one database vector resource:
 
-Tenant names and slugs are not used in Milvus names. Application clients cannot submit or override collection names.
+```text
+one tenant
+→ one stable logical Alias
+→ one fixed V1 physical Collection
+```
 
-A tenant collection contains all of that tenant's knowledge bases. Vector rows and filters still include `tenant_id` and `knowledge_base_id` as defense in depth.
+Example:
 
-Multiple physical versions for the same tenant intentionally share one stable alias. Revision `0004_vector_alias_versions` changes the alias database constraint from unique to a normal index so `v1`, `v2`, and later resources can coexist during upgrades.
+```text
+Alias:    rag_prod_t_<tenant-digest>_current
+Physical: rag_prod_t_<tenant-digest>_v1
+```
+
+Tenant names and slugs are never included in Milvus names. API clients cannot submit or override Collection names.
+
+A tenant Collection contains all of that tenant's knowledge bases. Every vector row still contains `tenant_id` and `knowledge_base_id`, and search/delete filters retain those values as defense in depth.
+
+The current database enforces:
+
+- one vector resource per tenant;
+- one tenant per logical Alias;
+- one tenant per physical Collection;
+- `schema_version = 1`.
 
 ## Create a tenant
 
-`POST /v1/platform/tenants` with `Authorization: Bearer $PLATFORM_API_KEY`.
+Call:
 
-The platform service creates the database tenant in `provisioning` state, creates and validates the Milvus physical collection, activates the stable alias, activates the tenant, and only then issues the initial owner API key. The response contains that plaintext key exactly once.
+```text
+POST /v1/platform/tenants
+Authorization: Bearer $PLATFORM_API_KEY
+```
 
-If Milvus provisioning fails, the tenant remains non-active, the vector resource is marked `failed`, the alias is not activated, and no initial API key is issued. Use the tenant ID from the error message to inspect and retry:
+The platform service performs these steps:
+
+1. Create the tenant in `provisioning` state.
+2. Create the initial Owner and membership.
+3. Optionally create the default knowledge base.
+4. Insert the pending tenant vector resource.
+5. Create and validate the V1 physical Collection.
+6. Create or validate the stable Alias.
+7. Mark the vector resource `ready`.
+8. Activate the tenant.
+9. Issue the initial Owner API key.
+
+The plaintext initial API key is returned exactly once.
+
+If Milvus provisioning fails, the tenant remains non-active, the vector resource is marked `failed`, and no initial API key is issued.
+
+Inspect and retry provisioning with:
 
 ```text
 GET  /v1/platform/tenants/{tenant_id}/vector-resource
 POST /v1/platform/tenants/{tenant_id}/vector-resource/retry
 ```
 
-Physical collection creation, validation, and alias activation are idempotent, so retrying does not duplicate resources.
+Provisioning is idempotent. An existing Collection must have the expected vector dimension and required fields. An existing Alias must already point to the tenant's V1 physical Collection; the application does not silently reassign an unexpected Alias.
 
-## Migrate an existing tenant
+## Runtime vector routing
 
-Existing tenants without a ready vector resource continue to use `MILVUS_LEGACY_COLLECTION`.
+Every authenticated request resolves the API key from PostgreSQL and obtains a trusted `tenant_id`. The service then loads the single `ready` vector resource for that tenant and stores its route in `TenantContext`.
 
-Start a tenant migration:
+Vector operations never read a tenant ID or Collection name from the request body.
+
+If no compatible ready resource exists, vector operations return `503 vector_store_unavailable`. There is no shared Collection fallback.
+
+Runtime route data includes:
+
+- logical Alias;
+- physical Collection name for administration and diagnostics;
+- embedding model and dimension;
+- metric type;
+- index type;
+- search parameters.
+
+Upsert, search, and delete always target the logical Alias. Search parameters come from the tenant resource, not from a separate runtime guess.
+
+## Defense in depth
+
+Vector writes include:
 
 ```text
-POST /v1/platform/tenants/{tenant_id}/vector-migration
+tenant_id
+knowledge_base_id
+document_id
+chunk_id
+document_version
+is_active
 ```
 
-Read migration status:
+Search filters include:
 
 ```text
-GET /v1/platform/tenants/{tenant_id}/vector-migration
+tenant_id == authenticated tenant
+AND knowledge_base_id == authorized knowledge base
+AND is_active == true
 ```
 
-The status response includes `migrated_count` and `last_chunk_id` for observability. `last_chunk_id` is not used as a skip cursor because Milvus query iteration does not provide a stable ID ordering contract.
+Delete filters include:
 
-Migration behavior:
+```text
+tenant_id == authenticated tenant
+AND knowledge_base_id == authorized knowledge base
+AND document_id == requested document
+```
 
-1. Create and validate the tenant physical collection without changing the live alias.
-2. Mark the tenant vector resource `migrating` with shared read mode.
-3. Read only rows matching the target tenant ID from the shared collection.
-4. Copy rows in batches using idempotent upsert and record per-run progress.
-5. While migration is running, retrieval continues against the shared collection, while new upserts and deletes are applied to both shared and tenant collections.
-6. After every source row has been copied successfully, activate the stable alias, mark the migration completed, and switch request routing to the alias.
-7. On failure, keep shared read mode and record the error. A retry resets current-run counters and replays all rows for that tenant; idempotent upsert makes this safe and avoids missing rows due to unspecified iterator ordering.
+This preserves tenant isolation even if a Collection route is configured incorrectly.
 
-Do not drop `MILVUS_LEGACY_COLLECTION` until every historical tenant has a completed migration and the rollback retention period has passed.
-
-The `/vector-migration` endpoint is specifically for moving existing rows from the legacy shared Collection into the current tenant Collection with the same vector dimension. It is not an embedding-model upgrade endpoint.
-
-## Collection upgrades and rollback
-
-For an embedding or schema upgrade:
-
-1. Increase `MILVUS_SCHEMA_VERSION` and configure the new model and dimension.
-2. Create the new physical collection for each tenant without moving the stable alias.
-3. Re-embed source chunks with the new embedding model; copying old vectors is invalid when dimensions or model semantics change.
-4. Validate document counts, chunk counts, dimensions, and retrieval quality.
-5. Reassign the stable alias to the new physical collection only after validation.
-6. Keep the previous physical collection during a rollback window.
-
-Rolling back is performed by moving the stable alias back to the previous physical collection. Application routes do not change because they use the alias.
-
-## Create users and administrators
+## Users and administrators
 
 - `POST /v1/users` creates a tenant user.
 - `PATCH /v1/users/{user_id}/role` changes `member`, `tenant_admin`, or `tenant_owner` according to delegation rules.
@@ -105,9 +142,9 @@ Rolling back is performed by moving the stable alias back to the previous physic
 
 A tenant administrator can create and manage members. Tenant owners can create and manage administrators and additional owners. The last active owner cannot be removed.
 
-## Create knowledge bases
+## Knowledge bases
 
-`POST /v1/knowledge-bases` requires `knowledge_bases:create`. The caller does not need to be a tenant administrator. The creator automatically receives `kb_admin`.
+`POST /v1/knowledge-bases` requires `knowledge_bases:create`. The creator automatically receives `kb_admin`.
 
 `PUT /v1/knowledge-bases/{knowledge_base_id}/members/{user_id}` assigns `kb_admin`, `editor`, or `viewer`.
 
@@ -126,4 +163,21 @@ V2 keys use `rag_live_<key_id>.<secret>`. Plaintext is returned once. `scope_lim
 - Purge requires `documents:delete`.
 - Retrieval requires `retrieval:read`.
 
-Every V2 request reloads tenant status, user status, membership, direct grants, knowledge-base ACLs, API-key limits, and the active tenant vector route. Permission and collection-route changes therefore affect existing keys on the next request.
+Every V2 request reloads tenant status, user status, membership, direct grants, knowledge-base ACLs, API-key limits, and the compatible ready vector route.
+
+## Deferred V2 upgrade work
+
+The current release does not implement:
+
+- a shared Collection;
+- Collection data migration;
+- multiple physical Collection versions;
+- hot embedding-model upgrades;
+- online vector-dimension upgrades;
+- dual-write;
+- Alias canary switching;
+- Collection rollback;
+- migration progress tables;
+- migration management APIs.
+
+See `docs/vector-collection-v2-roadmap.md` for the future design boundary. A future model upgrade must create a new physical Collection, regenerate vectors from canonical PostgreSQL chunk text, validate the new Collection, and only then switch the stable Alias.
