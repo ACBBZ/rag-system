@@ -96,7 +96,11 @@ class TenantProvisioningService:
         try:
             await self.vector_repository.mark_creating(resource.id)
             await self.session.commit()
-            await asyncio.to_thread(self.collection_manager.ensure_collection, resource)
+            await asyncio.to_thread(
+                self.collection_manager.ensure_physical_collection,
+                resource,
+            )
+            await asyncio.to_thread(self.collection_manager.activate_alias, resource)
             await self.vector_repository.mark_ready(resource.id)
             await self.management_repository.activate_tenant(tenant_id)
             api_key = None
