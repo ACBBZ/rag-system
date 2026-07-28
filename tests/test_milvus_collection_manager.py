@@ -2,6 +2,7 @@ from dataclasses import replace
 
 import pytest
 
+from rag.config import Settings
 from rag.storage.milvus_collection_manager import MilvusCollectionManager
 from rag.storage.vector_resources import TenantVectorResource
 
@@ -62,6 +63,28 @@ class FakeMilvusClient:
         self.aliases[alias] = collection_name
 
 
+def settings() -> Settings:
+    return Settings(
+        postgres_dsn="postgresql+asyncpg://rag:rag@localhost:5432/rag",
+        minio_endpoint="localhost:9000",
+        minio_access_key="minio",
+        minio_secret_key="miniopass",
+        milvus_uri="http://localhost:19530",
+        embedding_url="http://models:8000/v1/embeddings",
+        embedding_model="bge-m3",
+        embedding_api_key="embed-key",
+        rerank_url="http://models:8000/v1/rerank",
+        rerank_model="bge-reranker",
+        rerank_api_key="rerank-key",
+        query_rewrite_url="http://models:8000/v1/chat/completions",
+        query_rewrite_model="rewrite-model",
+        query_rewrite_api_key="rewrite-key",
+        llm_url="http://models:8000/v1/chat/completions",
+        llm_model="answer-model",
+        llm_api_key="llm-key",
+    )
+
+
 def resource() -> TenantVectorResource:
     return TenantVectorResource(
         id="vec_1",
@@ -80,9 +103,9 @@ def resource() -> TenantVectorResource:
     )
 
 
-def test_ensure_collection_creates_collection_and_alias(settings):
+def test_ensure_collection_creates_collection_and_alias():
     client = FakeMilvusClient()
-    manager = MilvusCollectionManager(client, settings)
+    manager = MilvusCollectionManager(client, settings())
 
     manager.ensure_collection(resource())
 
@@ -90,9 +113,9 @@ def test_ensure_collection_creates_collection_and_alias(settings):
     assert client.created_aliases == [("rag_t_a_v1", "rag_t_a_current")]
 
 
-def test_ensure_collection_is_idempotent(settings):
+def test_ensure_collection_is_idempotent():
     client = FakeMilvusClient()
-    manager = MilvusCollectionManager(client, settings)
+    manager = MilvusCollectionManager(client, settings())
 
     manager.ensure_collection(resource())
     manager.ensure_collection(resource())
@@ -102,10 +125,10 @@ def test_ensure_collection_is_idempotent(settings):
     assert client.altered_aliases == []
 
 
-def test_existing_alias_is_reassigned_to_new_collection(settings):
+def test_existing_alias_is_reassigned_to_new_collection():
     client = FakeMilvusClient()
     old = resource()
-    manager = MilvusCollectionManager(client, settings)
+    manager = MilvusCollectionManager(client, settings())
     manager.ensure_collection(old)
 
     upgraded = replace(old, physical_collection="rag_t_a_v2", schema_version=2)
@@ -114,14 +137,14 @@ def test_existing_alias_is_reassigned_to_new_collection(settings):
     assert client.altered_aliases == [("rag_t_a_v2", "rag_t_a_current")]
 
 
-def test_existing_collection_with_wrong_dimension_is_rejected(settings):
+def test_existing_collection_with_wrong_dimension_is_rejected():
     client = FakeMilvusClient()
     client.collections["rag_t_a_v1"] = {
         "collection_name": "rag_t_a_v1",
         "enable_dynamic_field": False,
         "fields": [{"name": "vector", "params": {"dim": 768}}],
     }
-    manager = MilvusCollectionManager(client, settings)
+    manager = MilvusCollectionManager(client, settings())
 
     with pytest.raises(ValueError, match="embedding dimension"):
         manager.ensure_collection(resource())
