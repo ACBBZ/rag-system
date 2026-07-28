@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 class TenantVectorRoute(BaseModel):
     collection_name: str
     physical_collection: str
-    mode: Literal["shared", "tenant_collection"]
+    mode: Literal["shared", "tenant_collection", "dual_write"]
     schema_version: int
     embedding_model: str
     embedding_dimension: int
