@@ -93,6 +93,20 @@ KNOWLEDGE_BASE_ROLE_PERMISSIONS: dict[KnowledgeBaseRole, frozenset[Permission]] 
     ),
 }
 
+LEGACY_SCOPE_PERMISSIONS: dict[str, frozenset[Permission]] = {
+    "read": frozenset({Permission.RETRIEVAL_READ, Permission.KNOWLEDGE_BASES_READ}),
+    "write": frozenset(
+        {
+            Permission.DOCUMENTS_CREATE,
+            Permission.DOCUMENTS_UPDATE,
+            Permission.RETRIEVAL_READ,
+            Permission.KNOWLEDGE_BASES_READ,
+        }
+    ),
+    "admin": frozenset(Permission),
+    "audit": frozenset({Permission.AUDIT_READ}),
+}
+
 
 def generate_api_key(key_id: str) -> tuple[str, str]:
     secret = secrets.token_urlsafe(32)
@@ -133,12 +147,22 @@ def validate_key_lifecycle(
         raise UnauthorizedError("expired API key")
 
 
+def expand_permissions(values: list[str] | set[str] | frozenset[str]) -> set[str]:
+    expanded: set[str] = set()
+    for value in values:
+        if value in LEGACY_SCOPE_PERMISSIONS:
+            expanded.update(permission.value for permission in LEGACY_SCOPE_PERMISSIONS[value])
+        else:
+            expanded.add(value)
+    return expanded
+
+
 def apply_scope_limit(
     permissions: set[str] | frozenset[str],
     scope_limit: list[str] | None,
 ) -> set[str]:
     dynamic = set(permissions)
-    return dynamic if scope_limit is None else dynamic.intersection(scope_limit)
+    return dynamic if scope_limit is None else dynamic.intersection(expand_permissions(scope_limit))
 
 
 def effective_permissions(
@@ -150,7 +174,8 @@ def effective_permissions(
     except ValueError:
         role_permissions = frozenset()
     permissions = {permission.value for permission in role_permissions}
-    permissions.update(tenant.direct_permissions)
+    permissions.update(expand_permissions(tenant.direct_permissions))
+    permissions.update(expand_permissions(tenant.allowed_scopes))
     if knowledge_base_role:
         try:
             kb_permissions = KNOWLEDGE_BASE_ROLE_PERMISSIONS[
