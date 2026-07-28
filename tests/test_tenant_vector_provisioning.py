@@ -67,12 +67,12 @@ class FakeVectorRepository:
             metric_type="COSINE",
             index_type="HNSW",
             index_params={"M": 16, "efConstruction": 200},
+            search_params={"ef": 64},
             schema_fingerprint="fingerprint",
             status="pending",
-            read_mode="tenant_collection",
         )
 
-    async def create_pending(self, tenant_id, read_mode="tenant_collection"):
+    async def create_pending(self, tenant_id):
         self.events.append("vector_pending")
         return self.resource
 
@@ -91,7 +91,7 @@ class FakeVectorRepository:
             **{**self.resource.__dict__, "status": "failed", "last_error": error}
         )
 
-    async def get_for_version(self, tenant_id, schema_version):
+    async def get(self, tenant_id):
         return self.resource
 
 
@@ -100,13 +100,10 @@ class FakeCollectionManager:
         self.events = events
         self.fail = fail
 
-    def ensure_physical_collection(self, resource):
-        self.events.append("milvus_physical_ready")
+    def ensure_collection(self, resource):
+        self.events.append("milvus_collection_ready")
         if self.fail:
             raise RuntimeError("milvus unavailable")
-
-    def activate_alias(self, resource):
-        self.events.append("milvus_alias_active")
 
 
 @pytest.mark.asyncio
@@ -128,8 +125,7 @@ async def test_initial_key_is_issued_only_after_collection_and_alias_are_ready()
     )
 
     assert result.api_key["id"] == "key_1"
-    assert events.index("milvus_physical_ready") < events.index("milvus_alias_active")
-    assert events.index("milvus_alias_active") < events.index("vector_ready")
+    assert events.index("milvus_collection_ready") < events.index("vector_ready")
     assert events.index("vector_ready") < events.index("tenant_active")
     assert events.index("tenant_active") < events.index("key_issued")
 
@@ -157,5 +153,4 @@ async def test_failed_collection_creation_is_retryable_and_does_not_issue_key():
 
     assert management.key_issued is False
     assert vector_repository.resource.status == "failed"
-    assert "milvus_alias_active" not in events
     assert "tenant_active" not in events
