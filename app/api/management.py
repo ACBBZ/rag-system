@@ -1,6 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +37,19 @@ def _check_role_delegation(actor: TenantContext, requested: TenantRole) -> None:
     if actor_role == TenantRole.ADMIN and requested == TenantRole.MEMBER:
         return
     raise ForbiddenError("cannot delegate requested tenant role")
+
+
+async def _get_target_role(session: AsyncSession, tenant_id: str, user_id: str) -> str | None:
+    result = await session.execute(
+        text(
+            """
+            select role from user_memberships
+            where tenant_id = :tenant_id and user_id = :user_id
+            """
+        ),
+        {"tenant_id": tenant_id, "user_id": user_id},
+    )
+    return result.scalar_one_or_none()
 
 
 @router.post("/users", response_model=UserSummary, status_code=201)
@@ -75,6 +89,11 @@ async def update_user_role(
     _check_role_delegation(tenant, role)
     if user_id == tenant.user_id:
         raise ForbiddenError("cannot change your own tenant role")
+    target_role = await _get_target_role(session, tenant.tenant_id, user_id)
+    if target_role is None:
+        raise NotFoundError("user not found")
+    if tenant.tenant_role == TenantRole.ADMIN and target_role != TenantRole.MEMBER:
+        raise ForbiddenError("tenant administrators can only manage members")
     repository = ManagementRepository(session, get_settings())
     try:
         await repository.update_user_role(
@@ -105,8 +124,11 @@ async def grant_user_permission(
         permission = Permission(request.permission)
     except ValueError as exc:
         raise ValidationError("invalid permission") from exc
+    require_permission(tenant, permission)
     if tenant.tenant_role != TenantRole.OWNER and permission == Permission.USERS_MANAGE_ADMINS:
         raise ForbiddenError("only tenant owners can grant administrator management")
+    if await _get_target_role(session, tenant.tenant_id, user_id) is None:
+        raise NotFoundError("user not found")
     repository = ManagementRepository(session, get_settings())
     await repository.grant_permission(
         tenant_id=tenant.tenant_id,
@@ -131,6 +153,8 @@ async def revoke_user_permission(
         parsed = Permission(permission)
     except ValueError as exc:
         raise ValidationError("invalid permission") from exc
+    if await _get_target_role(session, tenant.tenant_id, user_id) is None:
+        raise NotFoundError("user not found")
     repository = ManagementRepository(session, get_settings())
     await repository.revoke_permission(tenant.tenant_id, user_id, parsed.value)
     await session.commit()
@@ -143,7 +167,10 @@ async def create_own_api_key(
     tenant: Annotated[TenantContext, Depends(get_tenant_context)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ApiKeyCreated:
-    require_permission(tenant, Permission.API_KEYS_SELF_CREATE)
+    try:
+        require_permission(tenant, Permission.API_KEYS_SELF_CREATE)
+    except ForbiddenError:
+        require_permission(tenant, Permission.API_KEYS_MANAGE)
     repository = ManagementRepository(session, get_settings())
     key = await repository.issue_api_key(
         tenant_id=tenant.tenant_id,
@@ -166,6 +193,8 @@ async def create_user_api_key(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ApiKeyCreated:
     require_permission(tenant, Permission.API_KEYS_MANAGE)
+    if await _get_target_role(session, tenant.tenant_id, user_id) is None:
+        raise NotFoundError("user not found")
     repository = ManagementRepository(session, get_settings())
     key = await repository.issue_api_key(
         tenant_id=tenant.tenant_id,
