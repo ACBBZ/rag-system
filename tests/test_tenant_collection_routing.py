@@ -32,8 +32,8 @@ def settings() -> Settings:
         minio_access_key="minio",
         minio_secret_key="miniopass",
         milvus_uri="http://localhost:19530",
-        milvus_legacy_collection="rag_chunks",
         milvus_vector_dimension=2,
+        milvus_metric_type="L2",
         embedding_url="http://models:8000/v1/embeddings",
         embedding_model="bge-m3",
         embedding_api_key="embed-key",
@@ -51,73 +51,41 @@ def settings() -> Settings:
 
 def tenant_route() -> TenantVectorRoute:
     return TenantVectorRoute(
-        collection_name="rag_prod_t_abc_current",
+        collection_alias="rag_prod_t_abc_current",
         physical_collection="rag_prod_t_abc_v1",
-        mode="tenant_collection",
-        schema_version=1,
         embedding_model="bge-m3",
         embedding_dimension=2,
+        metric_type="COSINE",
+        index_type="HNSW",
+        search_params={"ef": 80},
     )
 
 
-def migration_route() -> TenantVectorRoute:
-    return TenantVectorRoute(
-        collection_name="rag_chunks",
-        physical_collection="rag_prod_t_abc_v1",
-        mode="dual_write",
-        schema_version=1,
-        embedding_model="bge-m3",
-        embedding_dimension=2,
-    )
-
-
-def test_collection_names_are_stable_and_do_not_expose_tenant_identity():
-    first = build_collection_names("ten_acme-customer", "rag_prod", 3)
-    second = build_collection_names("ten_acme-customer", "rag_prod", 3)
-    other = build_collection_names("ten_other-customer", "rag_prod", 3)
+def test_collection_names_are_stable_fixed_v1_and_do_not_expose_tenant_identity():
+    first = build_collection_names("ten_acme-customer", "rag_prod")
+    second = build_collection_names("ten_acme-customer", "rag_prod")
+    other = build_collection_names("ten_other-customer", "rag_prod")
 
     assert first == second
     assert first != other
     assert "acme" not in first.alias
     assert "customer" not in first.physical
     assert first.alias.endswith("_current")
-    assert first.physical.endswith("_v3")
-
-
-def test_collection_versions_share_one_stable_alias_and_use_distinct_physical_names():
-    first = build_collection_names("ten_a", "rag_prod", 1)
-    second = build_collection_names("ten_a", "rag_prod", 2)
-
-    assert first.alias == second.alias
-    assert first.physical != second.physical
     assert first.physical.endswith("_v1")
-    assert second.physical.endswith("_v2")
 
 
-def test_new_tenant_uses_database_loaded_alias():
+def test_authenticated_tenant_uses_database_loaded_alias():
     route = tenant_route()
     tenant = TenantContext(tenant_id="ten_a", user_id="usr_a", vector_route=route)
 
-    resolved = TenantCollectionResolver("rag_chunks").resolve(tenant)
-
-    assert resolved == route
+    assert TenantCollectionResolver().resolve(tenant) == route
 
 
-def test_legacy_tenant_uses_shared_collection_until_migrated():
-    tenant = TenantContext(tenant_id="ten_legacy", user_id="usr_legacy")
-
-    route = TenantCollectionResolver("rag_chunks").resolve(tenant)
-
-    assert route.collection_name == "rag_chunks"
-    assert route.physical_collection == "rag_chunks"
-    assert route.mode == "shared"
-
-
-def test_missing_tenant_and_legacy_routes_are_unavailable():
+def test_tenant_without_ready_vector_resource_is_unavailable():
     tenant = TenantContext(tenant_id="ten_a", user_id="usr_a")
 
     with pytest.raises(ServiceUnavailableError, match="vector collection is not ready"):
-        TenantCollectionResolver("").resolve(tenant)
+        TenantCollectionResolver().resolve(tenant)
 
 
 @pytest.mark.asyncio
@@ -132,6 +100,7 @@ async def test_upsert_uses_tenant_alias_and_keeps_tenant_metadata():
 
     await store.upsert_chunks(tenant, "kb_a", "doc_a", ["chk_a"], [[0.1, 0.2]])
 
+    assert len(client.upserts) == 1
     assert client.upserts[0]["collection_name"] == "rag_prod_t_abc_current"
     assert client.upserts[0]["data"][0]["tenant_id"] == "ten_a"
     assert client.upserts[0]["data"][0]["knowledge_base_id"] == "kb_a"
@@ -139,46 +108,7 @@ async def test_upsert_uses_tenant_alias_and_keeps_tenant_metadata():
 
 
 @pytest.mark.asyncio
-async def test_legacy_upsert_uses_shared_collection_without_new_schema_fields():
-    client = FakeMilvusClient()
-    store = MilvusVectorStore(settings(), client=client)
-    tenant = TenantContext(tenant_id="ten_legacy", user_id="usr_legacy")
-
-    await store.upsert_chunks(tenant, "kb_a", "doc_a", ["chk_a"], [[0.1, 0.2]])
-
-    assert client.upserts[0]["collection_name"] == "rag_chunks"
-    assert "document_version" not in client.upserts[0]["data"][0]
-
-
-@pytest.mark.asyncio
-async def test_migrating_tenant_reads_shared_and_writes_and_deletes_both_collections():
-    client = FakeMilvusClient()
-    store = MilvusVectorStore(settings(), client=client)
-    tenant = TenantContext(
-        tenant_id="ten_a",
-        user_id="usr_a",
-        vector_route=migration_route(),
-    )
-
-    await store.upsert_chunks(tenant, "kb_a", "doc_a", ["chk_a"], [[0.1, 0.2]])
-    await store.search(tenant, "kb_a", [0.1, 0.2], 5)
-    await store.delete_document(tenant, "kb_a", "doc_a")
-
-    assert [call["collection_name"] for call in client.upserts] == [
-        "rag_chunks",
-        "rag_prod_t_abc_v1",
-    ]
-    assert "document_version" not in client.upserts[0]["data"][0]
-    assert client.upserts[1]["data"][0]["document_version"] == 1
-    assert client.searches[0]["collection_name"] == "rag_chunks"
-    assert [call["collection_name"] for call in client.deletes] == [
-        "rag_chunks",
-        "rag_prod_t_abc_v1",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_search_and_delete_use_resolved_collection_and_defense_in_depth_filters():
+async def test_search_uses_route_search_configuration_and_defense_in_depth_filters():
     client = FakeMilvusClient()
     store = MilvusVectorStore(settings(), client=client)
     tenant = TenantContext(
@@ -188,10 +118,32 @@ async def test_search_and_delete_use_resolved_collection_and_defense_in_depth_fi
     )
 
     await store.search(tenant, "kb_a", [0.1, 0.2], 5)
+
+    call = client.searches[0]
+    assert call["collection_name"] == "rag_prod_t_abc_current"
+    assert call["search_params"] == {
+        "metric_type": "COSINE",
+        "params": {"ef": 80},
+    }
+    assert 'tenant_id == "ten_a"' in call["filter"]
+    assert 'knowledge_base_id == "kb_a"' in call["filter"]
+
+
+@pytest.mark.asyncio
+async def test_delete_uses_alias_and_tenant_knowledge_base_document_filters():
+    client = FakeMilvusClient()
+    store = MilvusVectorStore(settings(), client=client)
+    tenant = TenantContext(
+        tenant_id="ten_a",
+        user_id="usr_a",
+        vector_route=tenant_route(),
+    )
+
     await store.delete_document(tenant, "kb_a", "doc_a")
 
-    assert client.searches[0]["collection_name"] == "rag_prod_t_abc_current"
-    assert 'tenant_id == "ten_a"' in client.searches[0]["filter"]
-    assert 'knowledge_base_id == "kb_a"' in client.searches[0]["filter"]
-    assert client.deletes[0]["collection_name"] == "rag_prod_t_abc_current"
-    assert 'document_id == "doc_a"' in client.deletes[0]["filter"]
+    assert len(client.deletes) == 1
+    call = client.deletes[0]
+    assert call["collection_name"] == "rag_prod_t_abc_current"
+    assert 'tenant_id == "ten_a"' in call["filter"]
+    assert 'knowledge_base_id == "kb_a"' in call["filter"]
+    assert 'document_id == "doc_a"' in call["filter"]
