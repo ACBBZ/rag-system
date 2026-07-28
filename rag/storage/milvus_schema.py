@@ -9,6 +9,7 @@ from pymilvus import DataType, MilvusClient
 
 from rag.config import Settings
 
+TENANT_VECTOR_SCHEMA_VERSION = 1
 _SAFE_PREFIX = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,31}$")
 
 
@@ -18,20 +19,14 @@ class CollectionNames:
     physical: str
 
 
-def build_collection_names(
-    tenant_id: str,
-    prefix: str,
-    schema_version: int,
-) -> CollectionNames:
+def build_collection_names(tenant_id: str, prefix: str) -> CollectionNames:
     if not _SAFE_PREFIX.fullmatch(prefix):
         raise ValueError("invalid Milvus collection prefix")
-    if schema_version < 1:
-        raise ValueError("schema_version must be positive")
     digest = hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()[:16]
     base = f"{prefix}_t_{digest}"
     return CollectionNames(
         alias=f"{base}_current",
-        physical=f"{base}_v{schema_version}",
+        physical=f"{base}_v{TENANT_VECTOR_SCHEMA_VERSION}",
     )
 
 
@@ -44,14 +39,21 @@ def vector_index_params(settings: Settings) -> dict[str, object]:
     return {}
 
 
+def vector_search_params(settings: Settings) -> dict[str, object]:
+    if settings.milvus_index_type.upper() == "HNSW":
+        return {"ef": settings.milvus_search_ef}
+    return {}
+
+
 def schema_fingerprint(settings: Settings) -> str:
     payload = {
-        "schema_version": settings.milvus_schema_version,
+        "schema_version": TENANT_VECTOR_SCHEMA_VERSION,
         "embedding_model": settings.embedding_model,
         "embedding_dimension": settings.milvus_vector_dimension,
         "metric_type": settings.milvus_metric_type.upper(),
         "index_type": settings.milvus_index_type.upper(),
         "index_params": vector_index_params(settings),
+        "search_params": vector_search_params(settings),
         "fields": [
             ["id", "VARCHAR", 256],
             ["vector", "FLOAT_VECTOR", settings.milvus_vector_dimension],
@@ -89,18 +91,6 @@ def build_collection_schema(dimension: int):
     schema.add_field(field_name="document_version", datatype=DataType.INT64)
     schema.add_field(field_name="is_active", datatype=DataType.BOOL)
     return schema
-
-
-def build_index_params(client: MilvusClient, settings: Settings):
-    index_params = client.prepare_index_params()
-    index_params.add_index(
-        field_name="vector",
-        index_name="vector_index",
-        index_type=settings.milvus_index_type.upper(),
-        metric_type=settings.milvus_metric_type.upper(),
-        params=vector_index_params(settings),
-    )
-    return index_params
 
 
 def described_vector_dimension(description: dict[str, object]) -> int | None:
