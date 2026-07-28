@@ -63,7 +63,7 @@ class TenantProvisioningService:
         if context is None:
             raise NotFoundError("tenant not found")
         tenant, owner, knowledge_base_id = context
-        resource = await self.vector_repository.get_latest(tenant_id)
+        resource = await self.vector_repository.get(tenant_id)
         if resource is None:
             resource = await self.vector_repository.create_pending(tenant_id)
             await self.session.commit()
@@ -96,11 +96,7 @@ class TenantProvisioningService:
         try:
             await self.vector_repository.mark_creating(resource.id)
             await self.session.commit()
-            await asyncio.to_thread(
-                self.collection_manager.ensure_physical_collection,
-                resource,
-            )
-            await asyncio.to_thread(self.collection_manager.activate_alias, resource)
+            await asyncio.to_thread(self.collection_manager.ensure_collection, resource)
             await self.vector_repository.mark_ready(resource.id)
             await self.management_repository.activate_tenant(tenant_id)
             api_key = None
@@ -132,9 +128,7 @@ class TenantProvisioningService:
                 f"tenant {tenant_id} vector collection provisioning failed"
             ) from exc
 
-        refreshed = await self.vector_repository.get_for_version(
-            tenant_id, resource.schema_version
-        )
+        refreshed = await self.vector_repository.get(tenant_id)
         if refreshed is None:
             raise ServiceUnavailableError(
                 f"tenant {tenant_id} vector collection provisioning failed"
