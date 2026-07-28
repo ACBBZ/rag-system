@@ -43,7 +43,7 @@ class RetrievalPipeline:
         if request.options.vector_search is not False:
             vectors = await self.model_client.embed([query])
             candidates.append(
-                self.vector_store.search(
+                await self.vector_store.search(
                     tenant,
                     request.knowledge_base_id,
                     vectors[0],
