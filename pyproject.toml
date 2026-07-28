@@ -35,7 +35,15 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["app", "app.api", "rag", "rag.ingestion", "rag.models", "rag.storage"]
+packages = [
+  "app",
+  "app.api",
+  "rag",
+  "rag.ingestion",
+  "rag.models",
+  "rag.retrieval",
+  "rag.storage",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
