@@ -79,16 +79,22 @@ class FakeVectorRepository:
 
 
 class FakeMigrationRepository:
-    def __init__(self):
+    def __init__(self, last_chunk_id=None):
         self.events = []
         self.progress = []
+        self.last_chunk_id = last_chunk_id
 
     async def get_or_create(self, tenant_id, source_collection, target_collection):
         self.events.append("created")
-        return {"id": "mig_1", "status": "pending"}
+        return {
+            "id": "mig_1",
+            "status": "failed" if self.last_chunk_id else "pending",
+            "last_chunk_id": self.last_chunk_id,
+        }
 
     async def mark_running(self, migration_id):
         self.events.append("running")
+        self.progress = []
 
     async def add_progress(self, migration_id, count, last_chunk_id):
         self.progress.append((count, last_chunk_id))
@@ -105,6 +111,7 @@ class FakeMigrationRepository:
             "tenant_id": tenant_id,
             "source_collection": "rag_chunks",
             "target_collection": "rag_t_a_v1",
+            "last_chunk_id": self.progress[-1][1] if self.progress else None,
             "migrated_count": sum(item[0] for item in self.progress),
             "failed_count": 0,
             "status": self.events[-1] if self.events else "pending",
@@ -114,10 +121,13 @@ class FakeMigrationRepository:
 
 class FakeCollectionManager:
     def __init__(self):
-        self.resources = []
+        self.events = []
 
-    def ensure_collection(self, resource):
-        self.resources.append(resource)
+    def ensure_physical_collection(self, resource):
+        self.events.append("physical")
+
+    def activate_alias(self, resource):
+        self.events.append("alias")
 
 
 def settings() -> Settings:
@@ -144,7 +154,7 @@ def settings() -> Settings:
     )
 
 
-def source_row():
+def migration_row():
     return {
         "id": "chk_1",
         "vector": [0.1, 0.2],
@@ -157,17 +167,18 @@ def source_row():
 
 
 @pytest.mark.asyncio
-async def test_backfill_filters_one_tenant_and_activates_after_copy():
-    client = FakeMilvusClient([[source_row()]])
+async def test_backfill_filters_one_tenant_and_activates_alias_after_copy():
+    client = FakeMilvusClient([[migration_row()]])
     vectors = FakeVectorRepository()
     migrations = FakeMigrationRepository()
+    manager = FakeCollectionManager()
     service = TenantVectorMigrationService(
         session=FakeSession(),
         settings=settings(),
         client=client,
         vector_repository=vectors,
         migration_repository=migrations,
-        collection_manager=FakeCollectionManager(),
+        collection_manager=manager,
     )
 
     result = await service.backfill_tenant("ten_a")
@@ -177,13 +188,14 @@ async def test_backfill_filters_one_tenant_and_activates_after_copy():
     assert client.upserts[0]["collection_name"] == "rag_t_a_v1"
     assert client.upserts[0]["data"][0]["document_version"] == 1
     assert migrations.progress == [(1, "chk_1")]
+    assert manager.events == ["physical", "alias"]
     assert vectors.events == ["migrating", "activated"]
     assert result["migrated_count"] == 1
 
 
 @pytest.mark.asyncio
-async def test_backfill_failure_keeps_shared_route_and_records_failure():
-    client = FakeMilvusClient([[source_row()]])
+async def test_failed_collection_copy_does_not_activate_alias_or_tenant_route():
+    client = FakeMilvusClient([[migration_row()]])
 
     def fail_upsert(**kwargs):
         raise RuntimeError("target unavailable")
@@ -191,18 +203,56 @@ async def test_backfill_failure_keeps_shared_route_and_records_failure():
     client.upsert = fail_upsert
     vectors = FakeVectorRepository()
     migrations = FakeMigrationRepository()
+    manager = FakeCollectionManager()
     service = TenantVectorMigrationService(
         session=FakeSession(),
         settings=settings(),
         client=client,
         vector_repository=vectors,
         migration_repository=migrations,
-        collection_manager=FakeCollectionManager(),
+        collection_manager=manager,
     )
 
     with pytest.raises(RuntimeError, match="target unavailable"):
         await service.backfill_tenant("ten_a")
 
+    assert manager.events == ["physical"]
     assert "activated" not in vectors.events
     assert "failed" in vectors.events
     assert "failed" in migrations.events
+
+
+@pytest.mark.asyncio
+async def test_failed_migration_replays_tenant_rows_instead_of_using_unsafe_id_checkpoint():
+    client = FakeMilvusClient([[migration_row()]])
+    migrations = FakeMigrationRepository(last_chunk_id="chk_old")
+    service = TenantVectorMigrationService(
+        session=FakeSession(),
+        settings=settings(),
+        client=client,
+        vector_repository=FakeVectorRepository(),
+        migration_repository=migrations,
+        collection_manager=FakeCollectionManager(),
+    )
+
+    await service.backfill_tenant("ten_a")
+
+    assert client.query_calls[0]["filter"] == 'tenant_id == "ten_a"'
+
+
+@pytest.mark.asyncio
+async def test_migration_rejects_vectors_with_the_wrong_target_dimension():
+    row = migration_row()
+    row["vector"] = [0.1, 0.2, 0.3]
+    client = FakeMilvusClient([[row]])
+    service = TenantVectorMigrationService(
+        session=FakeSession(),
+        settings=settings(),
+        client=client,
+        vector_repository=FakeVectorRepository(),
+        migration_repository=FakeMigrationRepository(),
+        collection_manager=FakeCollectionManager(),
+    )
+
+    with pytest.raises(ValueError, match="embedding dimension"):
+        await service.backfill_tenant("ten_a")
