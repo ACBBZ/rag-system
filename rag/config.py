@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     milvus_uri: str = Field(alias="MILVUS_URI")
     milvus_collection: str = Field(default="rag_chunks", alias="MILVUS_COLLECTION")
 
+    api_key_pepper: str = Field(default="", alias="API_KEY_PEPPER")
+    platform_api_key: str = Field(default="", alias="PLATFORM_API_KEY")
+
     embedding_url: str = Field(alias="EMBEDDING_URL")
     embedding_model: str = Field(alias="EMBEDDING_MODEL")
     embedding_api_key: str = Field(alias="EMBEDDING_API_KEY")
