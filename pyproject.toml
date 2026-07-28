@@ -43,6 +43,7 @@ packages = [
   "rag.models",
   "rag.retrieval",
   "rag.storage",
+  "rag.tenants",
 ]
 
 [tool.pytest.ini_options]
