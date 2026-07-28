@@ -1,7 +1,17 @@
+import re
+
 from pymilvus import MilvusClient
 
 from rag.config import Settings
 from rag.schemas import RetrievedChunk, TenantContext
+
+_SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _safe_filter_id(value: str, field: str) -> str:
+    if not _SAFE_ID.fullmatch(value):
+        raise ValueError(f"invalid {field}")
+    return value
 
 
 class MilvusVectorStore:
@@ -17,6 +27,9 @@ class MilvusVectorStore:
         chunk_ids: list[str],
         vectors: list[list[float]],
     ) -> None:
+        _safe_filter_id(tenant.tenant_id, "tenant_id")
+        _safe_filter_id(knowledge_base_id, "knowledge_base_id")
+        _safe_filter_id(document_id, "document_id")
         rows = [
             {
                 "id": chunk_id,
@@ -38,9 +51,11 @@ class MilvusVectorStore:
         query_vector: list[float],
         top_k: int,
     ) -> list[RetrievedChunk]:
+        tenant_id = _safe_filter_id(tenant.tenant_id, "tenant_id")
+        kb_id = _safe_filter_id(knowledge_base_id, "knowledge_base_id")
         filter_expr = (
-            f'tenant_id == "{tenant.tenant_id}" and '
-            f'knowledge_base_id == "{knowledge_base_id}" and is_active == true'
+            f'tenant_id == "{tenant_id}" and '
+            f'knowledge_base_id == "{kb_id}" and is_active == true'
         )
         results = self.client.search(
             collection_name=self.collection,
@@ -66,11 +81,14 @@ class MilvusVectorStore:
         return chunks
 
     def delete_document(self, tenant_id: str, knowledge_base_id: str, document_id: str) -> None:
+        safe_tenant_id = _safe_filter_id(tenant_id, "tenant_id")
+        safe_kb_id = _safe_filter_id(knowledge_base_id, "knowledge_base_id")
+        safe_document_id = _safe_filter_id(document_id, "document_id")
         self.client.delete(
             collection_name=self.collection,
             filter=(
-                f'tenant_id == "{tenant_id}" and '
-                f'knowledge_base_id == "{knowledge_base_id}" and '
-                f'document_id == "{document_id}"'
+                f'tenant_id == "{safe_tenant_id}" and '
+                f'knowledge_base_id == "{safe_kb_id}" and '
+                f'document_id == "{safe_document_id}"'
             ),
         )
