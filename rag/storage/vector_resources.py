@@ -72,6 +72,13 @@ class VectorResourceRepository:
         self.session = session
         self.settings = settings
 
+    async def tenant_exists(self, tenant_id: str) -> bool:
+        result = await self.session.execute(
+            text("select 1 from tenants where id = :tenant_id"),
+            {"tenant_id": tenant_id},
+        )
+        return result.first() is not None
+
     async def create_pending(
         self,
         tenant_id: str,
