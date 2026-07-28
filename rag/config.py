@@ -18,8 +18,29 @@ class Settings(BaseSettings):
     minio_secret_key: str = Field(alias="MINIO_SECRET_KEY")
     minio_bucket: str = Field(default="rag-system", alias="MINIO_BUCKET")
     minio_secure: bool = Field(default=False, alias="MINIO_SECURE")
+
     milvus_uri: str = Field(alias="MILVUS_URI")
+    # Deprecated shared-collection setting retained for deployments that have not migrated yet.
     milvus_collection: str = Field(default="rag_chunks", alias="MILVUS_COLLECTION")
+    milvus_legacy_collection: str = Field(default="", alias="MILVUS_LEGACY_COLLECTION")
+    milvus_collection_prefix: str = Field(default="rag", alias="MILVUS_COLLECTION_PREFIX")
+    milvus_vector_dimension: int = Field(default=1024, ge=2, alias="MILVUS_VECTOR_DIMENSION")
+    milvus_metric_type: str = Field(default="COSINE", alias="MILVUS_METRIC_TYPE")
+    milvus_index_type: str = Field(default="HNSW", alias="MILVUS_INDEX_TYPE")
+    milvus_index_m: int = Field(default=16, ge=2, alias="MILVUS_INDEX_M")
+    milvus_index_ef_construction: int = Field(
+        default=200,
+        ge=8,
+        alias="MILVUS_INDEX_EF_CONSTRUCTION",
+    )
+    milvus_search_ef: int = Field(default=64, ge=1, alias="MILVUS_SEARCH_EF")
+    milvus_schema_version: int = Field(default=1, ge=1, alias="MILVUS_SCHEMA_VERSION")
+    milvus_migration_batch_size: int = Field(
+        default=500,
+        ge=1,
+        le=5000,
+        alias="MILVUS_MIGRATION_BATCH_SIZE",
+    )
 
     api_key_pepper: str = Field(default="", alias="API_KEY_PEPPER")
     platform_api_key: str = Field(default="", alias="PLATFORM_API_KEY")
@@ -48,6 +69,10 @@ class Settings(BaseSettings):
     default_hybrid_search_enabled: bool = Field(default=False, alias="DEFAULT_HYBRID_SEARCH_ENABLED")
     default_rerank_enabled: bool = Field(default=False, alias="DEFAULT_RERANK_ENABLED")
     default_agent_search_enabled: bool = Field(default=False, alias="DEFAULT_AGENT_SEARCH_ENABLED")
+
+    @property
+    def legacy_milvus_collection(self) -> str:
+        return self.milvus_legacy_collection or self.milvus_collection
 
 
 @lru_cache
