@@ -100,14 +100,17 @@ class FakeCollectionManager:
         self.events = events
         self.fail = fail
 
-    def ensure_collection(self, resource):
-        self.events.append("milvus_ready")
+    def ensure_physical_collection(self, resource):
+        self.events.append("milvus_physical_ready")
         if self.fail:
             raise RuntimeError("milvus unavailable")
 
+    def activate_alias(self, resource):
+        self.events.append("milvus_alias_active")
+
 
 @pytest.mark.asyncio
-async def test_initial_key_is_issued_only_after_collection_is_ready():
+async def test_initial_key_is_issued_only_after_collection_and_alias_are_ready():
     events = []
     service = TenantProvisioningService(
         session=FakeSession(events),
@@ -125,7 +128,8 @@ async def test_initial_key_is_issued_only_after_collection_is_ready():
     )
 
     assert result.api_key["id"] == "key_1"
-    assert events.index("milvus_ready") < events.index("vector_ready")
+    assert events.index("milvus_physical_ready") < events.index("milvus_alias_active")
+    assert events.index("milvus_alias_active") < events.index("vector_ready")
     assert events.index("vector_ready") < events.index("tenant_active")
     assert events.index("tenant_active") < events.index("key_issued")
 
@@ -153,4 +157,5 @@ async def test_failed_collection_creation_is_retryable_and_does_not_issue_key():
 
     assert management.key_issued is False
     assert vector_repository.resource.status == "failed"
+    assert "milvus_alias_active" not in events
     assert "tenant_active" not in events
