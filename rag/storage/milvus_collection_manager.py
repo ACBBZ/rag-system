@@ -24,31 +24,25 @@ class MilvusCollectionManager:
         self.settings = settings
 
     def ensure_collection(self, resource: TenantVectorResource) -> None:
-        """Create and validate the physical collection, then activate its stable alias."""
-        self.ensure_physical_collection(resource)
-        self.activate_alias(resource)
-
-    def ensure_physical_collection(self, resource: TenantVectorResource) -> None:
-        """Create and validate a physical collection without changing live alias routing."""
         if self.client.has_collection(collection_name=resource.physical_collection):
             self._validate_collection(resource)
-            return
-
-        schema = build_collection_schema(resource.embedding_dimension)
-        index_params = self.client.prepare_index_params()
-        index_params.add_index(
-            field_name="vector",
-            index_name="vector_index",
-            index_type=resource.index_type,
-            metric_type=resource.metric_type,
-            params=resource.index_params,
-        )
-        self.client.create_collection(
-            collection_name=resource.physical_collection,
-            schema=schema,
-            index_params=index_params,
-        )
-        self._validate_collection(resource)
+        else:
+            schema = build_collection_schema(resource.embedding_dimension)
+            index_params = self.client.prepare_index_params()
+            index_params.add_index(
+                field_name="vector",
+                index_name="vector_index",
+                index_type=resource.index_type,
+                metric_type=resource.metric_type,
+                params=resource.index_params,
+            )
+            self.client.create_collection(
+                collection_name=resource.physical_collection,
+                schema=schema,
+                index_params=index_params,
+            )
+            self._validate_collection(resource)
+        self._ensure_alias(resource)
 
     def _validate_collection(self, resource: TenantVectorResource) -> None:
         description = self.client.describe_collection(
@@ -73,8 +67,7 @@ class MilvusCollectionManager:
         if description.get("enable_dynamic_field") is True:
             raise ValueError("existing Milvus collection must disable dynamic fields")
 
-    def activate_alias(self, resource: TenantVectorResource) -> None:
-        """Point the tenant's stable alias at a fully prepared physical collection."""
+    def _ensure_alias(self, resource: TenantVectorResource) -> None:
         try:
             alias_description = self.client.describe_alias(alias=resource.logical_alias)
         except Exception:
@@ -86,14 +79,7 @@ class MilvusCollectionManager:
 
         current = alias_description.get("collection_name") or alias_description.get("collection")
         if current != resource.physical_collection:
-            self.client.alter_alias(
-                collection_name=resource.physical_collection,
-                alias=resource.logical_alias,
-            )
-
-    def ensure_alias(self, resource: TenantVectorResource) -> None:
-        """Compatibility wrapper for callers that used the previous method name."""
-        self.activate_alias(resource)
+            raise ValueError("tenant alias points to an unexpected collection")
 
     def drop_resource(self, resource: TenantVectorResource) -> None:
         try:
@@ -102,7 +88,8 @@ class MilvusCollectionManager:
             alias_description = None
         if alias_description is not None:
             current = alias_description.get("collection_name") or alias_description.get("collection")
-            if current == resource.physical_collection:
-                self.client.drop_alias(alias=resource.logical_alias)
+            if current != resource.physical_collection:
+                raise ValueError("tenant alias points to an unexpected collection")
+            self.client.drop_alias(alias=resource.logical_alias)
         if self.client.has_collection(collection_name=resource.physical_collection):
             self.client.drop_collection(collection_name=resource.physical_collection)
