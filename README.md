@@ -1,24 +1,60 @@
 # rag-system
 
-Production-oriented multi-tenant RAG system.
+Production-oriented multi-tenant RAG API built with FastAPI, PostgreSQL, MinIO, Milvus, and remote model endpoints.
 
 ## Features
 
 - FastAPI API service
-- Postgres metadata and audit storage
-- MinIO raw and parsed object storage
-- Milvus vector storage
-- Remote model endpoints configured through `.env`
+- PostgreSQL metadata, authorization, tenant resource, and audit storage
+- MinIO/S3-compatible raw and parsed object storage
+- One isolated Milvus Collection per tenant
+- Tenant users, roles, direct permissions, knowledge-base ACLs, and scoped API keys
+- Remote embedding, rerank, query-rewrite, LLM, and OCR endpoints configured through environment variables
 - Optional query rewrite, vector search, full-text search, hybrid search, rerank, and agent search
-- First supported file formats: `.txt`, `.md`, `.pdf`, `.docx`, `.csv`, `.xlsx`, `.xls`, `.png`, `.jpg`, `.jpeg`, `.webp`
+- File support for `.txt`, `.md`, `.pdf`, `.docx`, `.csv`, `.xlsx`, `.xls`, `.png`, `.jpg`, `.jpeg`, and `.webp`
 
-Model configuration is loaded from environment variables and is never accepted in API request bodies.
+Model and infrastructure configuration is loaded from environment variables and is never accepted in API request bodies.
+
+## Current Milvus architecture
+
+The current release uses a deliberately simple fixed V1 model:
+
+```text
+one tenant
+→ one stable logical Alias
+→ one fixed V1 physical Collection
+```
+
+Example:
+
+```text
+Alias:    rag_prod_t_<tenant-digest>_current
+Physical: rag_prod_t_<tenant-digest>_v1
+```
+
+Collection names are generated from a SHA-256 digest of the database `tenant_id`. Tenant names and slugs are not included.
+
+Every vector row still stores:
+
+- `tenant_id`
+- `knowledge_base_id`
+- `document_id`
+- `chunk_id`
+- `document_version`
+- `is_active`
+
+Search and delete operations continue to filter by the authenticated `tenant_id` and authorized `knowledge_base_id` as defense in depth.
+
+There is no shared Collection fallback, migration mode, or dual-write path in V1.
 
 ## Requirements
 
 - Python 3.11+
 - Docker and Docker Compose
-- Remote model-compatible endpoints for embedding, rerank, query rewrite, LLM, and OCR when those capabilities are enabled
+- PostgreSQL
+- MinIO or another S3-compatible object store
+- Milvus
+- Remote model-compatible endpoints for enabled embedding, rerank, query rewrite, LLM, and OCR capabilities
 
 ## Install
 
@@ -40,13 +76,53 @@ Copy the example environment file:
 cp .env.example .env
 ```
 
-Set infrastructure values:
+### Infrastructure
 
-- `POSTGRES_DSN`: SQLAlchemy async Postgres DSN, for example `postgresql+asyncpg://rag:rag@localhost:5432/rag`
-- `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET`, `MINIO_SECURE`
-- `MILVUS_URI`, `MILVUS_COLLECTION`
+Required infrastructure settings include:
 
-Set model endpoint values:
+```env
+POSTGRES_DSN=postgresql+asyncpg://rag:rag@localhost:5432/rag
+
+MINIO_ENDPOINT=localhost:9000
+MINIO_ACCESS_KEY=minio
+MINIO_SECRET_KEY=miniopass
+MINIO_BUCKET=rag-system
+MINIO_SECURE=false
+
+MILVUS_URI=http://localhost:19530
+MILVUS_COLLECTION_PREFIX=rag_dev
+```
+
+Use different Collection prefixes for development, test, and production environments.
+
+### Fixed V1 vector configuration
+
+```env
+MILVUS_VECTOR_DIMENSION=1024
+MILVUS_METRIC_TYPE=COSINE
+MILVUS_INDEX_TYPE=HNSW
+MILVUS_INDEX_M=16
+MILVUS_INDEX_EF_CONSTRUCTION=200
+MILVUS_SEARCH_EF=64
+```
+
+`MILVUS_VECTOR_DIMENSION` must exactly match the output dimension of `EMBEDDING_MODEL`.
+
+After the first tenant Collection is created, treat the embedding model, vector dimension, metric, index configuration, search configuration, and Milvus field schema as immutable for V1. The application stores a configuration fingerprint with each tenant resource and refuses to provide a vector route when the current configuration is incompatible.
+
+### Authorization secrets
+
+```env
+API_KEY_PEPPER=replace-with-a-long-random-secret
+PLATFORM_API_KEY=replace-with-a-separate-platform-admin-key
+```
+
+- `API_KEY_PEPPER` is used to HMAC-hash tenant API-key secrets. Changing it invalidates existing V2 keys.
+- `PLATFORM_API_KEY` protects `/v1/platform/*` control-plane endpoints and must not be distributed to tenant users.
+
+### Model endpoints
+
+Configure:
 
 - `EMBEDDING_URL`, `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`
 - `RERANK_URL`, `RERANK_MODEL`, `RERANK_API_KEY`
@@ -54,7 +130,7 @@ Set model endpoint values:
 - `LLM_URL`, `LLM_MODEL`, `LLM_API_KEY`
 - `OCR_URL`, `OCR_MODEL`, `OCR_API_KEY`
 
-Set default retrieval behavior:
+Retrieval defaults are controlled by:
 
 - `DEFAULT_QUERY_REWRITE_ENABLED`
 - `DEFAULT_VECTOR_SEARCH_ENABLED`
@@ -63,289 +139,178 @@ Set default retrieval behavior:
 - `DEFAULT_RERANK_ENABLED`
 - `DEFAULT_AGENT_SEARCH_ENABLED`
 
-## Local Services
+## Local infrastructure
 
-Start Postgres, MinIO, and Milvus:
+Start PostgreSQL, MinIO, and Milvus:
 
 ```bash
 docker compose up -d
 ```
 
-MinIO console is available at `http://localhost:9001` with the credentials from `docker-compose.yml`.
+The MinIO console is available at `http://localhost:9001` with the credentials from `docker-compose.yml`.
 
 ## Database
 
-The first schema migration is stored in `migrations/versions/0001_initial.py`. The current repository contains the migration code but does not include an `alembic.ini`; add one for your deployment target before running Alembic in an environment.
+The migration chain is:
 
-API authentication requires an active tenant API key row in Postgres. Requests must send:
-
-```http
-Authorization: Bearer <api-key>
+```text
+0001_initial
+→ 0002_authorization_v2
+→ 0003_tenant_vector_collections
 ```
 
-## Multi-Tenant Isolation
+The repository contains Alembic migration files but does not currently include a deployment-specific `alembic.ini`. Add the configuration for the target environment, then run:
 
-Tenant isolation is enforced from the API key down to every storage access.
+```bash
+alembic upgrade head
+```
 
-1. Each request sends `Authorization: Bearer <api-key>`.
-2. The API key is resolved from the `api_keys` table into a tenant context with:
-   - `tenant_id`
-   - `organization_id`
-   - `user_id`
-   - `allowed_scopes`
-   - `knowledge_base_ids`
-3. Request bodies only provide the target `knowledge_base_id`; they never provide `tenant_id`, model URLs, model names, API keys, or infrastructure credentials.
-4. The service validates that the authenticated tenant context can access the requested `knowledge_base_id`.
-5. Postgres tables store tenant-owned rows with `tenant_id`, and knowledge-base-owned rows also store `knowledge_base_id`.
-6. Milvus vector rows include scalar fields for `tenant_id`, `knowledge_base_id`, `document_id`, `chunk_id`, and `is_active`, so retrieval queries can filter before returning chunks.
-7. MinIO object keys should be generated under tenant and knowledge-base prefixes, for example `tenants/{tenant_id}/knowledge_bases/{knowledge_base_id}/documents/{document_id}/...`.
-8. Hard delete removes document metadata, chunks, vector rows, keyword rows, and MinIO objects for the authenticated tenant and knowledge base, while keeping only minimal audit metadata.
+`0003_tenant_vector_collections` creates exactly one vector-resource row per tenant and enforces:
 
-For deployment, seed these records before calling protected APIs:
+- unique `tenant_id`;
+- unique logical Alias;
+- unique physical Collection;
+- fixed `schema_version = 1`.
 
-- `tenants`: one row per tenant.
-- `knowledge_bases`: one or more knowledge bases scoped to the tenant.
-- `users` and optionally `organizations`: principals that own or operate the tenant data.
-- `api_keys`: hashed API keys with `knowledge_base_ids` and `allowed_scopes`.
+## Create the first tenant
 
-Recommended isolation checks for production:
+Tenant creation is a platform control-plane operation:
 
-- Reject any request where `knowledge_base_id` is not included in the API key context.
-- Require an admin-capable scope for destructive operations such as document purge.
-- Add database indexes that start with `tenant_id` and `knowledge_base_id` for tenant-owned query paths.
-- Use separate MinIO buckets or tenant-prefixed object keys depending on compliance requirements.
-- Keep model endpoint credentials only in environment variables or a secret manager.
+```http
+POST /v1/platform/tenants
+Authorization: Bearer <PLATFORM_API_KEY>
+Content-Type: application/json
+```
 
-## Start API
+Example:
 
-Development server:
+```bash
+curl -X POST http://localhost:8000/v1/platform/tenants \
+  -H "Authorization: Bearer $PLATFORM_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Acme",
+    "slug": "acme",
+    "owner_email": "owner@example.com",
+    "owner_display_name": "Acme Owner",
+    "default_knowledge_base_name": "Default"
+  }'
+```
+
+Provisioning performs:
+
+1. Create the tenant in `provisioning` state.
+2. Create the initial Owner and membership.
+3. Create the default knowledge base and ACL when requested.
+4. Insert the pending tenant vector resource.
+5. Create and validate the tenant V1 physical Collection.
+6. Create or validate the stable Alias.
+7. Mark the vector resource `ready`.
+8. Activate the tenant.
+9. Issue the initial Owner API key.
+
+The plaintext initial API key is returned exactly once.
+
+If Milvus provisioning fails, the tenant remains non-active, the resource is marked `failed`, and no initial key is issued.
+
+Inspect or retry provisioning with:
+
+```text
+GET  /v1/platform/tenants/{tenant_id}/vector-resource
+POST /v1/platform/tenants/{tenant_id}/vector-resource/retry
+```
+
+## Runtime authentication and isolation
+
+Protected tenant endpoints require:
+
+```http
+Authorization: Bearer <tenant-api-key>
+```
+
+The runtime flow is:
+
+1. Resolve and verify the API key from PostgreSQL.
+2. Load the trusted `tenant_id`, user, membership, permissions, key limits, and knowledge-base ACLs.
+3. Load the single compatible `ready` vector resource for that `tenant_id`.
+4. Put the tenant Alias and vector settings into `TenantContext`.
+5. Validate access to the requested knowledge base.
+6. Use the Alias for Milvus upsert, search, and delete.
+7. Keep `tenant_id` and `knowledge_base_id` scalar filters on Milvus operations.
+
+Clients never submit `tenant_id`, Collection names, model URLs, model names, infrastructure credentials, or platform secrets in business API bodies.
+
+When no compatible ready vector resource exists, vector operations return `503 vector_store_unavailable`. The service does not fall back to a global Collection.
+
+## Start the API
+
+Development:
 
 ```bash
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Production-style single-process start:
+Production-style single process:
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-The OpenAPI schema is available at `http://localhost:8000/docs`.
+OpenAPI is available at `http://localhost:8000/docs`.
 
-## Deploy
+## Main APIs
 
-1. Provision Postgres, MinIO-compatible object storage, Milvus, and the remote model services.
-2. Configure all required environment variables from `.env.example`.
-3. Apply the database migration for `migrations/versions/0001_initial.py`.
-4. Seed tenant, knowledge base, user, and API key rows.
-5. Run the FastAPI service with `uvicorn app.main:app --host 0.0.0.0 --port 8000` behind your process manager or container runtime.
-6. Configure TLS, request size limits, logging, backups, and secret management outside the application process.
+### Platform
 
-## API Usage
+- `POST /v1/platform/tenants`
+- `GET /v1/platform/tenants/{tenant_id}/vector-resource`
+- `POST /v1/platform/tenants/{tenant_id}/vector-resource/retry`
 
-All protected endpoints require:
+### Tenant management
 
-```http
-Authorization: Bearer <api-key>
-```
+- `POST /v1/users`
+- `PATCH /v1/users/{user_id}/role`
+- `PUT /v1/users/{user_id}/scope-grants`
+- `DELETE /v1/users/{user_id}/scope-grants/{permission}`
+- `POST /v1/api-keys`
+- `POST /v1/users/{user_id}/api-keys`
+- `DELETE /v1/api-keys/{api_key_id}`
 
-### Health Check
+### Knowledge bases
 
-```bash
-curl http://localhost:8000/health
-```
+- `POST /v1/knowledge-bases`
+- `PUT /v1/knowledge-bases/{knowledge_base_id}/members/{user_id}`
 
-### Embed Document
+### Documents
 
-`POST /v1/documents/embed`
+- `POST /v1/documents/embed`
+- `PATCH /v1/documents/{document_id}`
+- `DELETE /v1/documents/{document_id}/purge`
 
-Multipart form parameters:
+### Retrieval
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `knowledge_base_id` | string | yes | Target knowledge base ID. |
-| `title` | string | yes | Document title. |
-| `file` | file | yes | Uploaded document. |
-| `source_uri` | string | no | Original source URL or external file URI. |
+- `POST /v1/retrieval/search`
 
-Example:
+See `docs/authorization-v2-api.md` for permissions, key behavior, provisioning details, and tenant vector routing.
 
-```bash
-curl -X POST http://localhost:8000/v1/documents/embed \
-  -H "Authorization: Bearer $RAG_API_KEY" \
-  -F "knowledge_base_id=kb_001" \
-  -F "title=Product Handbook" \
-  -F "source_uri=s3://source/product-handbook.pdf" \
-  -F "file=@./product-handbook.pdf"
-```
+## Current V1 non-goals
 
-Response:
+The current release does not implement:
 
-```json
-{
-  "job_id": "job_...",
-  "document_id": "doc_...",
-  "status": "completed"
-}
-```
+- a shared Collection;
+- Collection data migration;
+- multiple physical Collection versions;
+- hot embedding-model upgrades;
+- online vector-dimension upgrades;
+- dual-write;
+- Alias canary or gradual switching;
+- Collection rollback;
+- migration progress tables;
+- migration management APIs.
 
-### Update Document
+These features are intentionally deferred because the project has not deployed PostgreSQL or Milvus and has no historical vector data to preserve.
 
-`PATCH /v1/documents/{document_id}`
-
-Form parameters:
-
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `knowledge_base_id` | string | yes | Knowledge base that owns the document. |
-
-Example:
-
-```bash
-curl -X PATCH http://localhost:8000/v1/documents/doc_001 \
-  -H "Authorization: Bearer $RAG_API_KEY" \
-  -F "knowledge_base_id=kb_001"
-```
-
-Response:
-
-```json
-{
-  "job_id": "job_...",
-  "document_id": "doc_001",
-  "version": 2,
-  "status": "completed"
-}
-```
-
-### Hard Delete Document
-
-`DELETE /v1/documents/{document_id}/purge`
-
-Query parameters:
-
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `knowledge_base_id` | string | yes | Knowledge base that owns the document. |
-
-Example:
-
-```bash
-curl -X DELETE "http://localhost:8000/v1/documents/doc_001/purge?knowledge_base_id=kb_001" \
-  -H "Authorization: Bearer $RAG_API_KEY"
-```
-
-Response:
-
-```json
-{
-  "document_id": "doc_001",
-  "status": "purged"
-}
-```
-
-### Retrieval Search
-
-`POST /v1/retrieval/search`
-
-JSON body:
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `knowledge_base_id` | string | yes | Knowledge base to search. |
-| `query` | string | yes | User query. |
-| `options` | object | no | Retrieval feature toggles and limits. |
-| `filters` | object | no | Document and metadata filters. |
-
-`options` fields:
-
-| Field | Type | Default | Description |
-| --- | --- | --- | --- |
-| `query_rewrite` | boolean or null | null | Enable query rewrite for this request. |
-| `vector_search` | boolean or null | null | Enable vector search for this request. |
-| `full_text_search` | boolean or null | null | Enable full-text search for this request. |
-| `hybrid_search` | boolean or null | null | Enable hybrid retrieval and result fusion. |
-| `rerank` | boolean or null | null | Enable reranking. |
-| `agent_search` | boolean or null | null | Return answer generation fields in addition to chunks. |
-| `top_k` | integer | 20 | Candidate retrieval limit, 1 to 100. |
-| `final_k` | integer | 5 | Final chunk limit, 1 to 50. |
-
-`filters` fields:
-
-| Field | Type | Default | Description |
-| --- | --- | --- | --- |
-| `document_ids` | string array | `[]` | Limit search to specific documents. |
-| `metadata` | object | `{}` | Exact metadata filters with string, number, or boolean values. |
-
-Example:
-
-```bash
-curl -X POST http://localhost:8000/v1/retrieval/search \
-  -H "Authorization: Bearer $RAG_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "knowledge_base_id": "kb_001",
-    "query": "How do I reset a user password?",
-    "options": {
-      "query_rewrite": true,
-      "vector_search": true,
-      "hybrid_search": true,
-      "rerank": true,
-      "agent_search": true,
-      "top_k": 20,
-      "final_k": 5
-    },
-    "filters": {
-      "document_ids": [],
-      "metadata": {
-        "department": "support"
-      }
-    }
-  }'
-```
-
-Response shape:
-
-```json
-{
-  "query_id": "qry_...",
-  "rewritten_query": "How can an admin reset a user password?",
-  "chunks": [
-    {
-      "chunk_id": "chunk_...",
-      "document_id": "doc_...",
-      "text": "Relevant passage...",
-      "score": 0.92,
-      "retrieval_method": "hybrid",
-      "source": {
-        "title": "Product Handbook",
-        "source_uri": "s3://source/product-handbook.pdf",
-        "page": 4
-      },
-      "metadata": {
-        "department": "support"
-      }
-    }
-  ],
-  "answer": "Answer text when agent_search is enabled.",
-  "citations": [
-    {
-      "chunk_id": "chunk_...",
-      "document_id": "doc_...",
-      "title": "Product Handbook",
-      "source_uri": "s3://source/product-handbook.pdf",
-      "page": 4,
-      "quote": "Relevant passage..."
-    }
-  ],
-  "usage": {
-    "prompt_tokens": 100,
-    "completion_tokens": 50
-  }
-}
-```
-
-Current implementation note: `/v1/retrieval/search` resolves the tenant from the Bearer API key, validates `read` access to the requested knowledge base, and runs the storage-backed retrieval pipeline.
+Future upgrades are documented in `docs/vector-collection-v2-roadmap.md`. A future embedding-model upgrade must create a new physical Collection, regenerate vectors from canonical PostgreSQL chunk text, validate the new Collection, and only then switch the stable Alias.
 
 ## Validate
 
