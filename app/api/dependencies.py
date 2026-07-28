@@ -4,7 +4,7 @@ from typing import Annotated
 from fastapi import Depends, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rag.auth import resolve_tenant_context
+from rag.auth import authorize_knowledge_base, resolve_tenant_context
 from rag.authz import Permission, require_permission
 from rag.config import get_settings
 from rag.errors import NotFoundError, UnauthorizedError
@@ -65,6 +65,18 @@ def authorize_knowledge_base_access(
     knowledge_base_id: str,
     permission: Permission,
 ) -> str | None:
+    if tenant.api_key_id is None and (tenant.allowed_scopes or tenant.knowledge_base_ids):
+        legacy_scope = {
+            Permission.RETRIEVAL_READ: "read",
+            Permission.DOCUMENTS_CREATE: "write",
+            Permission.DOCUMENTS_UPDATE: "write",
+            Permission.DOCUMENTS_DELETE: "admin",
+            Permission.KNOWLEDGE_BASES_MANAGE_MEMBERS: "admin",
+        }.get(permission)
+        if legacy_scope:
+            authorize_knowledge_base(tenant, knowledge_base_id, required_scope=legacy_scope)
+            return None
+
     if not tenant.can_access_knowledge_base(knowledge_base_id):
         raise NotFoundError("knowledge base not found")
     role = get_knowledge_base_role(tenant, knowledge_base_id)
