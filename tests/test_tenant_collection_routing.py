@@ -60,6 +60,17 @@ def tenant_route() -> TenantVectorRoute:
     )
 
 
+def migration_route() -> TenantVectorRoute:
+    return TenantVectorRoute(
+        collection_name="rag_chunks",
+        physical_collection="rag_prod_t_abc_v1",
+        mode="dual_write",
+        schema_version=1,
+        embedding_model="bge-m3",
+        embedding_dimension=2,
+    )
+
+
 def test_collection_names_are_stable_and_do_not_expose_tenant_identity():
     first = build_collection_names("ten_acme-customer", "rag_prod", 3)
     second = build_collection_names("ten_acme-customer", "rag_prod", 3)
@@ -127,6 +138,33 @@ async def test_legacy_upsert_uses_shared_collection_without_new_schema_fields():
 
     assert client.upserts[0]["collection_name"] == "rag_chunks"
     assert "document_version" not in client.upserts[0]["data"][0]
+
+
+@pytest.mark.asyncio
+async def test_migrating_tenant_reads_shared_and_writes_and_deletes_both_collections():
+    client = FakeMilvusClient()
+    store = MilvusVectorStore(settings(), client=client)
+    tenant = TenantContext(
+        tenant_id="ten_a",
+        user_id="usr_a",
+        vector_route=migration_route(),
+    )
+
+    await store.upsert_chunks(tenant, "kb_a", "doc_a", ["chk_a"], [[0.1, 0.2]])
+    await store.search(tenant, "kb_a", [0.1, 0.2], 5)
+    await store.delete_document(tenant, "kb_a", "doc_a")
+
+    assert [call["collection_name"] for call in client.upserts] == [
+        "rag_chunks",
+        "rag_prod_t_abc_v1",
+    ]
+    assert "document_version" not in client.upserts[0]["data"][0]
+    assert client.upserts[1]["data"][0]["document_version"] == 1
+    assert client.searches[0]["collection_name"] == "rag_chunks"
+    assert [call["collection_name"] for call in client.deletes] == [
+        "rag_chunks",
+        "rag_prod_t_abc_v1",
+    ]
 
 
 @pytest.mark.asyncio
