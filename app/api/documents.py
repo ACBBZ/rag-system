@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 
 from app.api.dependencies import get_ingestion_pipeline, get_tenant_context
+from rag.auth import authorize_knowledge_base
 from rag.ingestion.pipeline import IngestionPipeline
 from rag.schemas import (
     EmbedDocumentResponse,
@@ -23,6 +24,7 @@ async def embed_document(
     pipeline: Annotated[IngestionPipeline, Depends(get_ingestion_pipeline)],
     source_uri: Annotated[str | None, Form()] = None,
 ) -> EmbedDocumentResponse:
+    authorize_knowledge_base(tenant, knowledge_base_id, required_scope="write")
     content = await file.read()
     return await pipeline.embed_document(
         tenant=tenant,
@@ -42,6 +44,7 @@ async def update_document(
     tenant: Annotated[TenantContext, Depends(get_tenant_context)],
     pipeline: Annotated[IngestionPipeline, Depends(get_ingestion_pipeline)],
 ) -> UpdateDocumentResponse:
+    authorize_knowledge_base(tenant, knowledge_base_id, required_scope="write")
     return await pipeline.update_document(tenant, knowledge_base_id, document_id)
 
 
@@ -52,4 +55,5 @@ async def purge_document(
     tenant: Annotated[TenantContext, Depends(get_tenant_context)],
     pipeline: Annotated[IngestionPipeline, Depends(get_ingestion_pipeline)],
 ) -> PurgeDocumentResponse:
+    authorize_knowledge_base(tenant, knowledge_base_id, required_scope="admin")
     return await pipeline.purge_document(tenant, knowledge_base_id, document_id)

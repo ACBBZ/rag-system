@@ -1,6 +1,6 @@
 from typing import Protocol
 
-from rag.errors import UnauthorizedError
+from rag.errors import ForbiddenError, UnauthorizedError
 from rag.schemas import TenantContext
 
 
@@ -18,3 +18,13 @@ async def resolve_tenant_context(
         raise UnauthorizedError("invalid API key")
     return context
 
+
+def authorize_knowledge_base(
+    tenant: TenantContext,
+    knowledge_base_id: str,
+    required_scope: str,
+) -> None:
+    if not tenant.can_access_knowledge_base(knowledge_base_id):
+        raise ForbiddenError("knowledge base access denied")
+    if not tenant.has_scope(required_scope):
+        raise ForbiddenError(f"missing scope: {required_scope}")

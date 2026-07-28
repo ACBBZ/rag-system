@@ -9,6 +9,7 @@ from rag.config import get_settings
 from rag.errors import UnauthorizedError
 from rag.ingestion.pipeline import IngestionPipeline
 from rag.models.endpoints import ModelEndpointClient
+from rag.retrieval.pipeline import RetrievalPipeline
 from rag.schemas import TenantContext
 from rag.storage.database import get_async_engine, get_sessionmaker
 from rag.storage.milvus_store import MilvusVectorStore
@@ -31,14 +32,14 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 
 
 async def get_tenant_context(
+    api_key: Annotated[str, Depends(get_api_key)],
     session: Annotated[AsyncSession, Depends(get_session)],
-    authorization: str | None = Header(default=None),
 ) -> TenantContext:
-    api_key = await get_api_key(authorization)
     return await resolve_tenant_context(api_key, TenantRepository(session))
 
 
 async def get_ingestion_pipeline(
+    _tenant: Annotated[TenantContext, Depends(get_tenant_context)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> IngestionPipeline:
     settings = get_settings()
@@ -48,4 +49,18 @@ async def get_ingestion_pipeline(
         object_store=MinioObjectStore(settings),
         vector_store=MilvusVectorStore(settings),
         document_repository=DocumentRepository(session),
+    )
+
+
+async def get_retrieval_pipeline(
+    _tenant: Annotated[TenantContext, Depends(get_tenant_context)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> RetrievalPipeline:
+    settings = get_settings()
+    model_client = ModelEndpointClient(settings)
+    return RetrievalPipeline(
+        settings=settings,
+        model_client=model_client,
+        document_repository=DocumentRepository(session),
+        vector_store=MilvusVectorStore(settings),
     )

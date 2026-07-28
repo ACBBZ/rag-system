@@ -1,7 +1,7 @@
 import pytest
 
-from rag.auth import resolve_tenant_context
-from rag.errors import UnauthorizedError
+from rag.auth import authorize_knowledge_base, resolve_tenant_context
+from rag.errors import ForbiddenError, UnauthorizedError
 from rag.schemas import TenantContext
 
 
@@ -30,3 +30,38 @@ async def test_resolve_tenant_context_accepts_valid_key():
 async def test_resolve_tenant_context_rejects_invalid_key():
     with pytest.raises(UnauthorizedError):
         await resolve_tenant_context("bad-key", FakeTenantRepository())
+
+
+def test_authorize_knowledge_base_rejects_unlisted_knowledge_base():
+    tenant = TenantContext(
+        tenant_id="tenant_a",
+        user_id="user_a",
+        knowledge_base_ids=["kb_a"],
+        allowed_scopes=["read"],
+    )
+
+    with pytest.raises(ForbiddenError, match="knowledge base access denied"):
+        authorize_knowledge_base(tenant, "kb_b", required_scope="read")
+
+
+def test_authorize_knowledge_base_rejects_missing_scope():
+    tenant = TenantContext(
+        tenant_id="tenant_a",
+        user_id="user_a",
+        knowledge_base_ids=["kb_a"],
+        allowed_scopes=["read"],
+    )
+
+    with pytest.raises(ForbiddenError, match="missing scope: admin"):
+        authorize_knowledge_base(tenant, "kb_a", required_scope="admin")
+
+
+def test_authorize_knowledge_base_allows_listed_knowledge_base_with_scope():
+    tenant = TenantContext(
+        tenant_id="tenant_a",
+        user_id="user_a",
+        knowledge_base_ids=["kb_a"],
+        allowed_scopes=["read"],
+    )
+
+    authorize_knowledge_base(tenant, "kb_a", required_scope="read")

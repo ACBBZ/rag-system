@@ -345,7 +345,7 @@ Response shape:
 }
 ```
 
-Current implementation note: `/v1/retrieval/search` exposes the API contract and currently returns an empty retrieval skeleton until the storage-backed retrieval service is wired into the route.
+Current implementation note: `/v1/retrieval/search` resolves the tenant from the Bearer API key, validates `read` access to the requested knowledge base, and runs the storage-backed retrieval pipeline.
 
 ## Validate
 
