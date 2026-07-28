@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag.authz import parse_api_key, validate_key_lifecycle, verify_api_key_secret
 from rag.config import Settings
-from rag.schemas import TenantContext
+from rag.schemas import TenantContext, TenantVectorRoute
 
 
 class DynamicTenantRepository:
@@ -78,6 +78,7 @@ class DynamicTenantRepository:
             },
         )
         acl_rows = list(acl_result.mappings())
+        vector_route = await self._get_vector_route(row["tenant_id"])
         await self.session.execute(
             text("update api_keys set last_used_at = now() where id = :key_id"),
             {"key_id": key_id},
@@ -101,6 +102,7 @@ class DynamicTenantRepository:
                 for item in acl_rows
                 if item["role"]
             ],
+            vector_route=vector_route,
         )
 
     async def _get_legacy_context(self, api_key: str) -> TenantContext | None:
@@ -126,4 +128,32 @@ class DynamicTenantRepository:
             direct_permissions=list(row["allowed_scopes"]),
             scope_limit=list(row["allowed_scopes"]),
             knowledge_base_limit=list(row["knowledge_base_ids"]),
+            vector_route=await self._get_vector_route(row["tenant_id"]),
+        )
+
+    async def _get_vector_route(self, tenant_id: str) -> TenantVectorRoute | None:
+        result = await self.session.execute(
+            text(
+                """
+                select logical_alias, physical_collection, read_mode, schema_version,
+                       embedding_model, embedding_dimension
+                from tenant_vector_resources
+                where tenant_id = :tenant_id and status = 'ready'
+                  and read_mode = 'tenant_collection'
+                order by schema_version desc
+                limit 1
+                """
+            ),
+            {"tenant_id": tenant_id},
+        )
+        row = result.mappings().first()
+        if row is None:
+            return None
+        return TenantVectorRoute(
+            collection_name=row["logical_alias"],
+            physical_collection=row["physical_collection"],
+            mode="tenant_collection",
+            schema_version=int(row["schema_version"]),
+            embedding_model=row["embedding_model"],
+            embedding_dimension=int(row["embedding_dimension"]),
         )
