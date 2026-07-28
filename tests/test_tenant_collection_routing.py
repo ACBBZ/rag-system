@@ -84,6 +84,16 @@ def test_collection_names_are_stable_and_do_not_expose_tenant_identity():
     assert first.physical.endswith("_v3")
 
 
+def test_collection_versions_share_one_stable_alias_and_use_distinct_physical_names():
+    first = build_collection_names("ten_a", "rag_prod", 1)
+    second = build_collection_names("ten_a", "rag_prod", 2)
+
+    assert first.alias == second.alias
+    assert first.physical != second.physical
+    assert first.physical.endswith("_v1")
+    assert second.physical.endswith("_v2")
+
+
 def test_new_tenant_uses_database_loaded_alias():
     route = tenant_route()
     tenant = TenantContext(tenant_id="ten_a", user_id="usr_a", vector_route=route)
