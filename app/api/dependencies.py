@@ -13,14 +13,10 @@ from rag.models.endpoints import ModelEndpointClient
 from rag.retrieval.pipeline import RetrievalPipeline
 from rag.schemas import TenantContext
 from rag.storage.database import get_async_engine, get_sessionmaker
+from rag.storage.identity_repository import DynamicTenantRepository
 from rag.storage.milvus_store import MilvusVectorStore
 from rag.storage.minio_store import MinioObjectStore
-from rag.storage.repositories import (
-    AuthorizationRepository,
-    DocumentRepository,
-    ManagementRepository,
-    TenantRepository,
-)
+from rag.storage.repositories import DocumentRepository, ManagementRepository
 
 
 async def get_api_key(authorization: str | None = Header(default=None)) -> str:
@@ -53,21 +49,25 @@ async def get_tenant_context(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> TenantContext:
     settings = get_settings()
-    return await resolve_tenant_context(api_key, TenantRepository(session, settings))
+    return await resolve_tenant_context(api_key, DynamicTenantRepository(session, settings))
 
 
-async def authorize_knowledge_base_access(
-    session: AsyncSession,
+def get_knowledge_base_role(tenant: TenantContext, knowledge_base_id: str) -> str | None:
+    prefix = f"kb:{knowledge_base_id}:"
+    for role in tenant.roles:
+        if role.startswith(prefix):
+            return role.removeprefix(prefix)
+    return None
+
+
+def authorize_knowledge_base_access(
     tenant: TenantContext,
     knowledge_base_id: str,
     permission: Permission,
 ) -> str | None:
-    repository = AuthorizationRepository(session)
-    if not await repository.knowledge_base_exists(tenant.tenant_id, knowledge_base_id):
+    if not tenant.can_access_knowledge_base(knowledge_base_id):
         raise NotFoundError("knowledge base not found")
-    role = await repository.get_knowledge_base_role(
-        tenant.tenant_id, tenant.user_id, knowledge_base_id
-    )
+    role = get_knowledge_base_role(tenant, knowledge_base_id)
     require_permission(
         tenant,
         permission,
