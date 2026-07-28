@@ -1,16 +1,16 @@
 from datetime import datetime
-from typing import Literal
 
 from pydantic import BaseModel, Field
 
 
 class TenantVectorRoute(BaseModel):
-    collection_name: str
+    collection_alias: str
     physical_collection: str
-    mode: Literal["shared", "tenant_collection", "dual_write"]
-    schema_version: int
     embedding_model: str
     embedding_dimension: int
+    metric_type: str
+    index_type: str
+    search_params: dict[str, object] = Field(default_factory=dict)
 
 
 class TenantContext(BaseModel):
@@ -73,21 +73,8 @@ class VectorResourceSummary(BaseModel):
     metric_type: str
     index_type: str
     status: str
-    read_mode: str
     last_error: str | None = None
     activated_at: datetime | None = None
-
-
-class VectorMigrationSummary(BaseModel):
-    id: str
-    tenant_id: str
-    source_collection: str
-    target_collection: str
-    last_chunk_id: str | None = None
-    migrated_count: int
-    failed_count: int
-    status: str
-    last_error: str | None = None
 
 
 class CreateTenantRequest(BaseModel):
