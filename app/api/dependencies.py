@@ -5,8 +5,9 @@ from fastapi import Depends, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag.auth import resolve_tenant_context
+from rag.authz import Permission, require_permission
 from rag.config import get_settings
-from rag.errors import UnauthorizedError
+from rag.errors import NotFoundError, UnauthorizedError
 from rag.ingestion.pipeline import IngestionPipeline
 from rag.models.endpoints import ModelEndpointClient
 from rag.retrieval.pipeline import RetrievalPipeline
@@ -14,13 +15,29 @@ from rag.schemas import TenantContext
 from rag.storage.database import get_async_engine, get_sessionmaker
 from rag.storage.milvus_store import MilvusVectorStore
 from rag.storage.minio_store import MinioObjectStore
-from rag.storage.repositories import DocumentRepository, TenantRepository
+from rag.storage.repositories import (
+    AuthorizationRepository,
+    DocumentRepository,
+    ManagementRepository,
+    TenantRepository,
+)
 
 
 async def get_api_key(authorization: str | None = Header(default=None)) -> str:
     if authorization is None or not authorization.startswith("Bearer "):
         raise UnauthorizedError("missing bearer token")
-    return authorization.removeprefix("Bearer ").strip()
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        raise UnauthorizedError("missing bearer token")
+    return token
+
+
+async def get_platform_api_key(authorization: str | None = Header(default=None)) -> str:
+    token = await get_api_key(authorization)
+    expected = get_settings().platform_api_key
+    if not expected or token != expected:
+        raise UnauthorizedError("invalid platform API key")
+    return token
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
@@ -35,7 +52,35 @@ async def get_tenant_context(
     api_key: Annotated[str, Depends(get_api_key)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> TenantContext:
-    return await resolve_tenant_context(api_key, TenantRepository(session))
+    settings = get_settings()
+    return await resolve_tenant_context(api_key, TenantRepository(session, settings))
+
+
+async def authorize_knowledge_base_access(
+    session: AsyncSession,
+    tenant: TenantContext,
+    knowledge_base_id: str,
+    permission: Permission,
+) -> str | None:
+    repository = AuthorizationRepository(session)
+    if not await repository.knowledge_base_exists(tenant.tenant_id, knowledge_base_id):
+        raise NotFoundError("knowledge base not found")
+    role = await repository.get_knowledge_base_role(
+        tenant.tenant_id, tenant.user_id, knowledge_base_id
+    )
+    require_permission(
+        tenant,
+        permission,
+        knowledge_base_id=knowledge_base_id,
+        knowledge_base_role=role,
+    )
+    return role
+
+
+async def get_management_repository(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ManagementRepository:
+    return ManagementRepository(session, get_settings())
 
 
 async def get_ingestion_pipeline(
