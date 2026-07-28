@@ -135,12 +135,10 @@ class DynamicTenantRepository:
         result = await self.session.execute(
             text(
                 """
-                select logical_alias, physical_collection, read_mode, status,
-                       schema_version, embedding_model, embedding_dimension
+                select logical_alias, physical_collection, embedding_model,
+                       embedding_dimension, metric_type, index_type, search_params
                 from tenant_vector_resources
-                where tenant_id = :tenant_id
-                  and status in ('ready', 'migrating')
-                order by schema_version desc
+                where tenant_id = :tenant_id and status = 'ready'
                 limit 1
                 """
             ),
@@ -149,23 +147,12 @@ class DynamicTenantRepository:
         row = result.mappings().first()
         if row is None:
             return None
-        if row["status"] == "migrating" or row["read_mode"] == "shared":
-            source = self.settings.legacy_milvus_collection
-            if not source:
-                return None
-            return TenantVectorRoute(
-                collection_name=source,
-                physical_collection=row["physical_collection"],
-                mode="dual_write",
-                schema_version=int(row["schema_version"]),
-                embedding_model=row["embedding_model"],
-                embedding_dimension=int(row["embedding_dimension"]),
-            )
         return TenantVectorRoute(
-            collection_name=row["logical_alias"],
+            collection_alias=row["logical_alias"],
             physical_collection=row["physical_collection"],
-            mode="tenant_collection",
-            schema_version=int(row["schema_version"]),
             embedding_model=row["embedding_model"],
             embedding_dimension=int(row["embedding_dimension"]),
+            metric_type=row["metric_type"],
+            index_type=row["index_type"],
+            search_params=dict(row["search_params"] or {}),
         )
