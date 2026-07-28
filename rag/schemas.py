@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -5,15 +7,103 @@ class TenantContext(BaseModel):
     tenant_id: str
     organization_id: str | None = None
     user_id: str
-    knowledge_base_ids: list[str]
+    api_key_id: str | None = None
+    tenant_role: str = "member"
+    direct_permissions: list[str] = Field(default_factory=list)
+    scope_limit: list[str] | None = None
+    knowledge_base_limit: list[str] | None = None
+    knowledge_base_ids: list[str] = Field(default_factory=list)
     roles: list[str] = Field(default_factory=list)
     allowed_scopes: list[str] = Field(default_factory=list)
 
     def can_access_knowledge_base(self, knowledge_base_id: str) -> bool:
-        return knowledge_base_id in self.knowledge_base_ids
+        if self.knowledge_base_limit is not None:
+            return knowledge_base_id in self.knowledge_base_limit
+        if self.knowledge_base_ids:
+            return knowledge_base_id in self.knowledge_base_ids
+        return True
 
     def has_scope(self, scope: str) -> bool:
-        return scope in self.allowed_scopes
+        limits = self.scope_limit if self.scope_limit is not None else self.allowed_scopes
+        return scope in limits if limits else False
+
+
+class TenantSummary(BaseModel):
+    id: str
+    slug: str
+    name: str
+    status: str
+
+
+class UserSummary(BaseModel):
+    id: str
+    tenant_id: str
+    email: str
+    display_name: str | None = None
+    status: str
+    role: str
+
+
+class ApiKeyCreated(BaseModel):
+    id: str
+    prefix: str
+    api_key: str
+    expires_at: datetime | None = None
+
+
+class CreateTenantRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,62}$")
+    owner_email: str = Field(min_length=3, max_length=320)
+    owner_display_name: str | None = Field(default=None, max_length=200)
+    default_knowledge_base_name: str | None = Field(default="Default", max_length=200)
+
+
+class CreateTenantResponse(BaseModel):
+    tenant: TenantSummary
+    owner: UserSummary
+    knowledge_base_id: str | None = None
+    api_key: ApiKeyCreated
+
+
+class CreateUserRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    display_name: str | None = Field(default=None, max_length=200)
+    role: str = "member"
+
+
+class UpdateUserRoleRequest(BaseModel):
+    role: str
+
+
+class PermissionGrantRequest(BaseModel):
+    permission: str
+    expires_at: datetime | None = None
+
+
+class CreateApiKeyRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    scope_limit: list[str] | None = None
+    knowledge_base_limit: list[str] | None = None
+    expires_at: datetime | None = None
+
+
+class CreateKnowledgeBaseRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+class KnowledgeBaseSummary(BaseModel):
+    id: str
+    tenant_id: str
+    name: str
+    description: str | None = None
+    status: str
+    role: str | None = None
+
+
+class KnowledgeBaseMemberRequest(BaseModel):
+    role: str
 
 
 class RetrievalOptions(BaseModel):
@@ -88,4 +178,3 @@ class UpdateDocumentResponse(BaseModel):
 class PurgeDocumentResponse(BaseModel):
     document_id: str
     status: str
-
