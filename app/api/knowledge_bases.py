@@ -66,8 +66,7 @@ async def set_knowledge_base_member(
     tenant: Annotated[TenantContext, Depends(get_tenant_context)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
-    await authorize_knowledge_base_access(
-        session,
+    authorize_knowledge_base_access(
         tenant,
         knowledge_base_id,
         Permission.KNOWLEDGE_BASES_MANAGE_MEMBERS,
