@@ -33,6 +33,7 @@ def settings() -> Settings:
         minio_secret_key="miniopass",
         milvus_uri="http://localhost:19530",
         milvus_legacy_collection="rag_chunks",
+        milvus_vector_dimension=2,
         embedding_url="http://models:8000/v1/embeddings",
         embedding_model="bge-m3",
         embedding_api_key="embed-key",
@@ -55,7 +56,7 @@ def tenant_route() -> TenantVectorRoute:
         mode="tenant_collection",
         schema_version=1,
         embedding_model="bge-m3",
-        embedding_dimension=1024,
+        embedding_dimension=2,
     )
 
 
