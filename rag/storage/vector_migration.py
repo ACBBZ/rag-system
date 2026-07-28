@@ -148,11 +148,10 @@ class TenantVectorMigrationService:
 
     async def backfill_tenant(self, tenant_id: str) -> dict[str, object]:
         safe_tenant_id = _safe_filter_id(tenant_id, "tenant_id")
-        source_collection = _safe_collection_name(
-            self.settings.legacy_milvus_collection
-        )
-        if not source_collection:
+        configured_source = self.settings.legacy_milvus_collection.strip()
+        if not configured_source:
             raise ServiceUnavailableError("legacy Milvus collection is not configured")
+        source_collection = _safe_collection_name(configured_source)
 
         resource = await self.vector_repository.get_latest(tenant_id)
         if resource is None:
