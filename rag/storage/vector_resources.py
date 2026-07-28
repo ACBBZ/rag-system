@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
@@ -8,7 +9,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag.config import Settings
-from rag.storage.milvus_schema import build_collection_names, schema_fingerprint, vector_index_params
+from rag.errors import NotFoundError
+from rag.storage.milvus_schema import (
+    TENANT_VECTOR_SCHEMA_VERSION,
+    build_collection_names,
+    schema_fingerprint,
+    vector_index_params,
+    vector_search_params,
+)
 
 
 @dataclass(frozen=True)
@@ -23,9 +31,9 @@ class TenantVectorResource:
     metric_type: str
     index_type: str
     index_params: dict[str, object]
+    search_params: dict[str, object]
     schema_fingerprint: str
     status: str
-    read_mode: str
     last_error: str | None = None
     activated_at: datetime | None = None
 
@@ -42,9 +50,9 @@ class TenantVectorResource:
             metric_type=row["metric_type"],
             index_type=row["index_type"],
             index_params=dict(row["index_params"] or {}),
+            search_params=dict(row["search_params"] or {}),
             schema_fingerprint=row["schema_fingerprint"],
             status=row["status"],
-            read_mode=row["read_mode"],
             last_error=row.get("last_error"),
             activated_at=row.get("activated_at"),
         )
@@ -61,7 +69,6 @@ class TenantVectorResource:
             "metric_type": self.metric_type,
             "index_type": self.index_type,
             "status": self.status,
-            "read_mode": self.read_mode,
             "last_error": self.last_error,
             "activated_at": self.activated_at,
         }
@@ -79,24 +86,26 @@ class VectorResourceRepository:
         )
         return result.first() is not None
 
-    async def create_pending(
-        self,
-        tenant_id: str,
-        *,
-        read_mode: str = "tenant_collection",
-    ) -> TenantVectorResource:
-        existing = await self.get_for_version(tenant_id, self.settings.milvus_schema_version)
+    async def create_pending(self, tenant_id: str) -> TenantVectorResource:
+        if not await self.tenant_exists(tenant_id):
+            raise NotFoundError("tenant not found")
+
+        expected_fingerprint = schema_fingerprint(self.settings)
+        existing = await self.get(tenant_id)
         if existing is not None:
+            if existing.schema_fingerprint != expected_fingerprint:
+                raise ValueError(
+                    "configured vector schema does not match the existing tenant resource"
+                )
             return existing
 
         names = build_collection_names(
             tenant_id,
             self.settings.milvus_collection_prefix,
-            self.settings.milvus_schema_version,
         )
         resource_id = f"vec_{uuid4().hex}"
-        params = vector_index_params(self.settings)
-        fingerprint = schema_fingerprint(self.settings)
+        index_params = vector_index_params(self.settings)
+        search_params = vector_search_params(self.settings)
         await self.session.execute(
             text(
                 """
@@ -104,12 +113,13 @@ class VectorResourceRepository:
                     id, tenant_id, provider, cluster_key, logical_alias,
                     physical_collection, schema_version, embedding_model,
                     embedding_dimension, metric_type, index_type, index_params,
-                    schema_fingerprint, status, read_mode
+                    search_params, schema_fingerprint, status
                 ) values (
                     :id, :tenant_id, 'milvus', 'default', :logical_alias,
                     :physical_collection, :schema_version, :embedding_model,
-                    :embedding_dimension, :metric_type, :index_type, :index_params,
-                    :schema_fingerprint, 'pending', :read_mode
+                    :embedding_dimension, :metric_type, :index_type,
+                    cast(:index_params as json), cast(:search_params as json),
+                    :schema_fingerprint, 'pending'
                 )
                 """
             ),
@@ -118,45 +128,27 @@ class VectorResourceRepository:
                 "tenant_id": tenant_id,
                 "logical_alias": names.alias,
                 "physical_collection": names.physical,
-                "schema_version": self.settings.milvus_schema_version,
+                "schema_version": TENANT_VECTOR_SCHEMA_VERSION,
                 "embedding_model": self.settings.embedding_model,
                 "embedding_dimension": self.settings.milvus_vector_dimension,
                 "metric_type": self.settings.milvus_metric_type.upper(),
                 "index_type": self.settings.milvus_index_type.upper(),
-                "index_params": params,
-                "schema_fingerprint": fingerprint,
-                "read_mode": read_mode,
+                "index_params": json.dumps(index_params),
+                "search_params": json.dumps(search_params),
+                "schema_fingerprint": expected_fingerprint,
             },
         )
-        created = await self.get_for_version(tenant_id, self.settings.milvus_schema_version)
+        created = await self.get(tenant_id)
         if created is None:
             raise RuntimeError("failed to create tenant vector resource")
         return created
 
-    async def get_for_version(
-        self,
-        tenant_id: str,
-        schema_version: int,
-    ) -> TenantVectorResource | None:
-        result = await self.session.execute(
-            text(
-                """
-                select * from tenant_vector_resources
-                where tenant_id = :tenant_id and schema_version = :schema_version
-                """
-            ),
-            {"tenant_id": tenant_id, "schema_version": schema_version},
-        )
-        row = result.mappings().first()
-        return TenantVectorResource.from_mapping(row) if row is not None else None
-
-    async def get_latest(self, tenant_id: str) -> TenantVectorResource | None:
+    async def get(self, tenant_id: str) -> TenantVectorResource | None:
         result = await self.session.execute(
             text(
                 """
                 select * from tenant_vector_resources
                 where tenant_id = :tenant_id
-                order by schema_version desc
                 limit 1
                 """
             ),
@@ -171,8 +163,6 @@ class VectorResourceRepository:
                 """
                 select * from tenant_vector_resources
                 where tenant_id = :tenant_id and status = 'ready'
-                  and read_mode = 'tenant_collection'
-                order by schema_version desc
                 limit 1
                 """
             ),
@@ -199,20 +189,7 @@ class VectorResourceRepository:
                 """
                 update tenant_vector_resources
                 set status = 'ready', last_error = null,
-                    activated_at = now(), updated_at = now()
-                where id = :id
-                """
-            ),
-            {"id": resource_id},
-        )
-
-    async def mark_migrating(self, resource_id: str) -> None:
-        await self.session.execute(
-            text(
-                """
-                update tenant_vector_resources
-                set status = 'migrating', read_mode = 'shared',
-                    last_error = null, updated_at = now()
+                    activated_at = coalesce(activated_at, now()), updated_at = now()
                 where id = :id
                 """
             ),
@@ -224,24 +201,9 @@ class VectorResourceRepository:
             text(
                 """
                 update tenant_vector_resources
-                set status = 'failed', read_mode = 'shared',
-                    last_error = :error, updated_at = now()
+                set status = 'failed', last_error = :error, updated_at = now()
                 where id = :id
                 """
             ),
             {"id": resource_id, "error": error[:4000]},
-        )
-
-    async def activate_read_mode(self, resource_id: str) -> None:
-        await self.session.execute(
-            text(
-                """
-                update tenant_vector_resources
-                set read_mode = 'tenant_collection', status = 'ready',
-                    last_error = null,
-                    activated_at = coalesce(activated_at, now()), updated_at = now()
-                where id = :id
-                """
-            ),
-            {"id": resource_id},
         )
