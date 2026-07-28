@@ -2,7 +2,7 @@
 
 ## Required configuration
 
-Set `API_KEY_PEPPER` to a long random secret and `PLATFORM_API_KEY` to a separate platform-control credential. Apply Alembic revisions through `0003_tenant_vector_collections` before creating or migrating tenants.
+Set `API_KEY_PEPPER` to a long random secret and `PLATFORM_API_KEY` to a separate platform-control credential. Apply Alembic revisions through `0004_vector_alias_versions` before creating or migrating tenants.
 
 Configure Milvus with:
 
@@ -34,20 +34,22 @@ Tenant names and slugs are not used in Milvus names. Application clients cannot 
 
 A tenant collection contains all of that tenant's knowledge bases. Vector rows and filters still include `tenant_id` and `knowledge_base_id` as defense in depth.
 
+Multiple physical versions for the same tenant intentionally share one stable alias. Revision `0004_vector_alias_versions` changes the alias database constraint from unique to a normal index so `v1`, `v2`, and later resources can coexist during upgrades.
+
 ## Create a tenant
 
 `POST /v1/platform/tenants` with `Authorization: Bearer $PLATFORM_API_KEY`.
 
-The platform service creates the database tenant in `provisioning` state, creates and validates the Milvus physical collection, creates the stable alias, activates the tenant, and only then issues the initial owner API key. The response contains that plaintext key exactly once.
+The platform service creates the database tenant in `provisioning` state, creates and validates the Milvus physical collection, activates the stable alias, activates the tenant, and only then issues the initial owner API key. The response contains that plaintext key exactly once.
 
-If Milvus provisioning fails, the tenant remains non-active, the vector resource is marked `failed`, and no initial API key is issued. Use the tenant ID from the error message to inspect and retry:
+If Milvus provisioning fails, the tenant remains non-active, the vector resource is marked `failed`, the alias is not activated, and no initial API key is issued. Use the tenant ID from the error message to inspect and retry:
 
 ```text
 GET  /v1/platform/tenants/{tenant_id}/vector-resource
 POST /v1/platform/tenants/{tenant_id}/vector-resource/retry
 ```
 
-Collection and alias creation are idempotent, so retrying does not duplicate resources.
+Physical collection creation, validation, and alias activation are idempotent, so retrying does not duplicate resources.
 
 ## Migrate an existing tenant
 
@@ -65,27 +67,31 @@ Read migration status:
 GET /v1/platform/tenants/{tenant_id}/vector-migration
 ```
 
+The status response includes `migrated_count` and `last_chunk_id` for observability. `last_chunk_id` is not used as a skip cursor because Milvus query iteration does not provide a stable ID ordering contract.
+
 Migration behavior:
 
-1. Create and validate the tenant physical collection and alias.
+1. Create and validate the tenant physical collection without changing the live alias.
 2. Mark the tenant vector resource `migrating` with shared read mode.
-3. Read only rows matching the authenticated tenant ID from the shared collection.
-4. Copy rows in batches using idempotent upsert and persist `last_chunk_id` progress.
+3. Read only rows matching the target tenant ID from the shared collection.
+4. Copy rows in batches using idempotent upsert and record per-run progress.
 5. While migration is running, retrieval continues against the shared collection, while new upserts and deletes are applied to both shared and tenant collections.
-6. After a successful copy, mark the migration completed and switch request routing to the stable alias.
-7. On failure, keep shared read mode, preserve progress, record the error, and allow the same endpoint to resume.
+6. After every source row has been copied successfully, activate the stable alias, mark the migration completed, and switch request routing to the alias.
+7. On failure, keep shared read mode and record the error. A retry resets current-run counters and replays all rows for that tenant; idempotent upsert makes this safe and avoids missing rows due to unspecified iterator ordering.
 
 Do not drop `MILVUS_LEGACY_COLLECTION` until every historical tenant has a completed migration and the rollback retention period has passed.
+
+The `/vector-migration` endpoint is specifically for moving existing rows from the legacy shared Collection into the current tenant Collection with the same vector dimension. It is not an embedding-model upgrade endpoint.
 
 ## Collection upgrades and rollback
 
 For an embedding or schema upgrade:
 
 1. Increase `MILVUS_SCHEMA_VERSION` and configure the new model and dimension.
-2. Create the new physical collection for each tenant.
-3. Backfill or re-embed data.
-4. Validate counts and retrieval quality.
-5. Reassign the stable alias to the new physical collection.
+2. Create the new physical collection for each tenant without moving the stable alias.
+3. Re-embed source chunks with the new embedding model; copying old vectors is invalid when dimensions or model semantics change.
+4. Validate document counts, chunk counts, dimensions, and retrieval quality.
+5. Reassign the stable alias to the new physical collection only after validation.
 6. Keep the previous physical collection during a rollback window.
 
 Rolling back is performed by moving the stable alias back to the previous physical collection. Application routes do not change because they use the alias.
