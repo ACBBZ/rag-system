@@ -84,7 +84,13 @@ class IngestionPipeline:
                 for chunk_id, chunk in zip(chunk_ids, chunk_inputs, strict=True)
             ]
         )
-        self.vector_store.upsert_chunks(tenant, knowledge_base_id, document_id, chunk_ids, vectors)
+        await self.vector_store.upsert_chunks(
+            tenant,
+            knowledge_base_id,
+            document_id,
+            chunk_ids,
+            vectors,
+        )
         return EmbedDocumentResponse(job_id=job_id, document_id=document_id, status="queued")
 
     async def update_document(
@@ -115,7 +121,7 @@ class IngestionPipeline:
             tenant, knowledge_base_id, document_id
         ):
             raise NotFoundError("document not found")
-        self.vector_store.delete_document(tenant.tenant_id, knowledge_base_id, document_id)
+        await self.vector_store.delete_document(tenant, knowledge_base_id, document_id)
         prefix = (
             f"tenants/{tenant.tenant_id}/knowledge_bases/{knowledge_base_id}/documents/"
             f"{document_id}/"
