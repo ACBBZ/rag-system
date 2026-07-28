@@ -144,23 +144,21 @@ def settings() -> Settings:
     )
 
 
+def source_row():
+    return {
+        "id": "chk_1",
+        "vector": [0.1, 0.2],
+        "tenant_id": "ten_a",
+        "knowledge_base_id": "kb_a",
+        "document_id": "doc_a",
+        "chunk_id": "chk_1",
+        "is_active": True,
+    }
+
+
 @pytest.mark.asyncio
 async def test_backfill_filters_one_tenant_and_activates_after_copy():
-    client = FakeMilvusClient(
-        [
-            [
-                {
-                    "id": "chk_1",
-                    "vector": [0.1, 0.2],
-                    "tenant_id": "ten_a",
-                    "knowledge_base_id": "kb_a",
-                    "document_id": "doc_a",
-                    "chunk_id": "chk_1",
-                    "is_active": True,
-                }
-            ]
-        ]
-    )
+    client = FakeMilvusClient([[source_row()]])
     vectors = FakeVectorRepository()
     migrations = FakeMigrationRepository()
     service = TenantVectorMigrationService(
@@ -185,14 +183,11 @@ async def test_backfill_filters_one_tenant_and_activates_after_copy():
 
 @pytest.mark.asyncio
 async def test_backfill_failure_keeps_shared_route_and_records_failure():
-    client = FakeMilvusClient([])
+    client = FakeMilvusClient([[source_row()]])
 
     def fail_upsert(**kwargs):
         raise RuntimeError("target unavailable")
 
-    client.iterator = FakeIterator(
-        [[{"id": "chk_1", "vector": [0.1, 0.2], "tenant_id": "ten_a"}]]
-    )
     client.upsert = fail_upsert
     vectors = FakeVectorRepository()
     migrations = FakeMigrationRepository()
