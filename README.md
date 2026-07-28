@@ -83,6 +83,39 @@ API authentication requires an active tenant API key row in Postgres. Requests m
 Authorization: Bearer <api-key>
 ```
 
+## Multi-Tenant Isolation
+
+Tenant isolation is enforced from the API key down to every storage access.
+
+1. Each request sends `Authorization: Bearer <api-key>`.
+2. The API key is resolved from the `api_keys` table into a tenant context with:
+   - `tenant_id`
+   - `organization_id`
+   - `user_id`
+   - `allowed_scopes`
+   - `knowledge_base_ids`
+3. Request bodies only provide the target `knowledge_base_id`; they never provide `tenant_id`, model URLs, model names, API keys, or infrastructure credentials.
+4. The service validates that the authenticated tenant context can access the requested `knowledge_base_id`.
+5. Postgres tables store tenant-owned rows with `tenant_id`, and knowledge-base-owned rows also store `knowledge_base_id`.
+6. Milvus vector rows include scalar fields for `tenant_id`, `knowledge_base_id`, `document_id`, `chunk_id`, and `is_active`, so retrieval queries can filter before returning chunks.
+7. MinIO object keys should be generated under tenant and knowledge-base prefixes, for example `tenants/{tenant_id}/knowledge_bases/{knowledge_base_id}/documents/{document_id}/...`.
+8. Hard delete removes document metadata, chunks, vector rows, keyword rows, and MinIO objects for the authenticated tenant and knowledge base, while keeping only minimal audit metadata.
+
+For deployment, seed these records before calling protected APIs:
+
+- `tenants`: one row per tenant.
+- `knowledge_bases`: one or more knowledge bases scoped to the tenant.
+- `users` and optionally `organizations`: principals that own or operate the tenant data.
+- `api_keys`: hashed API keys with `knowledge_base_ids` and `allowed_scopes`.
+
+Recommended isolation checks for production:
+
+- Reject any request where `knowledge_base_id` is not included in the API key context.
+- Require an admin-capable scope for destructive operations such as document purge.
+- Add database indexes that start with `tenant_id` and `knowledge_base_id` for tenant-owned query paths.
+- Use separate MinIO buckets or tenant-prefixed object keys depending on compliance requirements.
+- Keep model endpoint credentials only in environment variables or a secret manager.
+
 ## Start API
 
 Development server:
