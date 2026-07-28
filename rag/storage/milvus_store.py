@@ -31,15 +31,12 @@ class MilvusVectorStore:
         client: MilvusClient | None = None,
         resolver: TenantCollectionResolver | None = None,
     ) -> None:
-        self.settings = settings
         self.client = client or MilvusClient(uri=settings.milvus_uri)
-        self.resolver = resolver or TenantCollectionResolver(
-            settings.legacy_milvus_collection
-        )
+        self.resolver = resolver or TenantCollectionResolver()
 
     def _resolve(self, tenant: TenantContext) -> TenantVectorRoute:
         route = self.resolver.resolve(tenant)
-        _safe_collection_name(route.collection_name)
+        _safe_collection_name(route.collection_alias)
         _safe_collection_name(route.physical_collection)
         return route
 
@@ -55,12 +52,11 @@ class MilvusVectorStore:
         _safe_filter_id(tenant.tenant_id, "tenant_id")
         _safe_filter_id(knowledge_base_id, "knowledge_base_id")
         _safe_filter_id(document_id, "document_id")
-        if route.embedding_dimension > 0:
-            invalid = [len(vector) for vector in vectors if len(vector) != route.embedding_dimension]
-            if invalid:
-                raise ValueError("embedding dimension does not match tenant collection")
+        invalid = [len(vector) for vector in vectors if len(vector) != route.embedding_dimension]
+        if invalid:
+            raise ValueError("embedding dimension does not match tenant collection")
 
-        base_rows = [
+        rows = [
             {
                 "id": chunk_id,
                 "vector": vector,
@@ -68,35 +64,15 @@ class MilvusVectorStore:
                 "knowledge_base_id": knowledge_base_id,
                 "document_id": document_id,
                 "chunk_id": chunk_id,
+                "document_version": 1,
                 "is_active": True,
             }
             for chunk_id, vector in zip(chunk_ids, vectors, strict=True)
         ]
-        if route.mode == "shared":
-            await asyncio.to_thread(
-                self.client.upsert,
-                collection_name=route.collection_name,
-                data=base_rows,
-            )
-            return
-        if route.mode == "dual_write":
-            await asyncio.to_thread(
-                self.client.upsert,
-                collection_name=route.collection_name,
-                data=base_rows,
-            )
-            target_rows = [dict(row, document_version=1) for row in base_rows]
-            await asyncio.to_thread(
-                self.client.upsert,
-                collection_name=route.physical_collection,
-                data=target_rows,
-            )
-            return
-        tenant_rows = [dict(row, document_version=1) for row in base_rows]
         await asyncio.to_thread(
             self.client.upsert,
-            collection_name=route.collection_name,
-            data=tenant_rows,
+            collection_name=route.collection_alias,
+            data=rows,
         )
 
     async def search(
@@ -109,23 +85,23 @@ class MilvusVectorStore:
         route = self._resolve(tenant)
         tenant_id = _safe_filter_id(tenant.tenant_id, "tenant_id")
         kb_id = _safe_filter_id(knowledge_base_id, "knowledge_base_id")
-        if route.embedding_dimension > 0 and len(query_vector) != route.embedding_dimension:
+        if len(query_vector) != route.embedding_dimension:
             raise ValueError("embedding dimension does not match tenant collection")
+
         filter_expr = (
             f'tenant_id == "{tenant_id}" and '
             f'knowledge_base_id == "{kb_id}" and is_active == true'
         )
-        search_params: dict[str, object] = {
-            "metric_type": self.settings.milvus_metric_type.upper(),
-            "params": {},
+        params = dict(route.search_params)
+        if route.index_type.upper() == "HNSW":
+            params["ef"] = max(int(params.get("ef", top_k)), top_k)
+        search_params = {
+            "metric_type": route.metric_type.upper(),
+            "params": params,
         }
-        if self.settings.milvus_index_type.upper() == "HNSW":
-            search_params["params"] = {
-                "ef": max(self.settings.milvus_search_ef, top_k)
-            }
         results = await asyncio.to_thread(
             self.client.search,
-            collection_name=route.collection_name,
+            collection_name=route.collection_alias,
             data=[query_vector],
             limit=top_k,
             filter=filter_expr,
@@ -165,12 +141,6 @@ class MilvusVectorStore:
         )
         await asyncio.to_thread(
             self.client.delete,
-            collection_name=route.collection_name,
+            collection_name=route.collection_alias,
             filter=filter_expr,
         )
-        if route.mode == "dual_write":
-            await asyncio.to_thread(
-                self.client.delete,
-                collection_name=route.physical_collection,
-                filter=filter_expr,
-            )
