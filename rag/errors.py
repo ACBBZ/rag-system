@@ -22,3 +22,7 @@ class ValidationError(RAGError):
     status_code = 400
     code = "invalid_request"
 
+
+class ServiceUnavailableError(RAGError):
+    status_code = 503
+    code = "vector_store_unavailable"
