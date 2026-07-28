@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from rag.authz import parse_api_key, validate_key_lifecycle, verify_api_key_secret
 from rag.config import Settings
 from rag.schemas import TenantContext, TenantVectorRoute
+from rag.storage.milvus_schema import schema_fingerprint
 
 
 class DynamicTenantRepository:
@@ -136,7 +137,8 @@ class DynamicTenantRepository:
             text(
                 """
                 select logical_alias, physical_collection, embedding_model,
-                       embedding_dimension, metric_type, index_type, search_params
+                       embedding_dimension, metric_type, index_type, search_params,
+                       schema_fingerprint
                 from tenant_vector_resources
                 where tenant_id = :tenant_id and status = 'ready'
                 limit 1
@@ -145,7 +147,7 @@ class DynamicTenantRepository:
             {"tenant_id": tenant_id},
         )
         row = result.mappings().first()
-        if row is None:
+        if row is None or row["schema_fingerprint"] != schema_fingerprint(self.settings):
             return None
         return TenantVectorRoute(
             collection_alias=row["logical_alias"],
