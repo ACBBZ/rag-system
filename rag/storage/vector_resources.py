@@ -199,12 +199,26 @@ class VectorResourceRepository:
             {"id": resource_id},
         )
 
+    async def mark_migrating(self, resource_id: str) -> None:
+        await self.session.execute(
+            text(
+                """
+                update tenant_vector_resources
+                set status = 'migrating', read_mode = 'shared',
+                    last_error = null, updated_at = now()
+                where id = :id
+                """
+            ),
+            {"id": resource_id},
+        )
+
     async def mark_failed(self, resource_id: str, error: str) -> None:
         await self.session.execute(
             text(
                 """
                 update tenant_vector_resources
-                set status = 'failed', last_error = :error, updated_at = now()
+                set status = 'failed', read_mode = 'shared',
+                    last_error = :error, updated_at = now()
                 where id = :id
                 """
             ),
@@ -217,6 +231,7 @@ class VectorResourceRepository:
                 """
                 update tenant_vector_resources
                 set read_mode = 'tenant_collection', status = 'ready',
+                    last_error = null,
                     activated_at = coalesce(activated_at, now()), updated_at = now()
                 where id = :id
                 """
