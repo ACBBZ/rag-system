@@ -48,7 +48,7 @@ class TenantProvisioningService:
                 default_knowledge_base_name=default_knowledge_base_name,
             )
         )
-        resource = await self.vector_repository.create_pending(tenant["id"])
+        resource = await self.vector_repository.create_pending(str(tenant["id"]))
         await self.session.commit()
         return await self._provision(
             tenant=tenant,
@@ -92,16 +92,17 @@ class TenantProvisioningService:
         resource: TenantVectorResource,
         issue_initial_key: bool,
     ) -> TenantProvisioningResult:
+        tenant_id = str(tenant["id"])
         try:
             await self.vector_repository.mark_creating(resource.id)
             await self.session.commit()
             await asyncio.to_thread(self.collection_manager.ensure_collection, resource)
             await self.vector_repository.mark_ready(resource.id)
-            await self.management_repository.activate_tenant(str(tenant["id"]))
+            await self.management_repository.activate_tenant(tenant_id)
             api_key = None
             if issue_initial_key:
                 api_key = await self.management_repository.issue_api_key(
-                    tenant_id=str(tenant["id"]),
+                    tenant_id=tenant_id,
                     user_id=str(owner["id"]),
                     name="Initial owner key",
                     scope_limit=None,
@@ -110,12 +111,12 @@ class TenantProvisioningService:
                     created_by_user_id=str(owner["id"]),
                 )
             await self.management_repository.audit(
-                tenant_id=str(tenant["id"]),
+                tenant_id=tenant_id,
                 actor_user_id=str(owner["id"]),
                 actor_api_key_id=api_key["id"] if api_key else None,
                 action="tenant.created",
                 target_type="tenant",
-                target_id=str(tenant["id"]),
+                target_id=tenant_id,
                 after_state={"vector_collection": resource.logical_alias},
             )
             await self.session.commit()
@@ -123,13 +124,17 @@ class TenantProvisioningService:
             await self.session.rollback()
             await self.vector_repository.mark_failed(resource.id, str(exc))
             await self.session.commit()
-            raise ServiceUnavailableError("tenant vector collection provisioning failed") from exc
+            raise ServiceUnavailableError(
+                f"tenant {tenant_id} vector collection provisioning failed"
+            ) from exc
 
         refreshed = await self.vector_repository.get_for_version(
-            str(tenant["id"]), resource.schema_version
+            tenant_id, resource.schema_version
         )
         if refreshed is None:
-            raise ServiceUnavailableError("tenant vector collection provisioning failed")
+            raise ServiceUnavailableError(
+                f"tenant {tenant_id} vector collection provisioning failed"
+            )
         active_tenant = {**tenant, "status": "active"}
         return TenantProvisioningResult(
             tenant=active_tenant,
