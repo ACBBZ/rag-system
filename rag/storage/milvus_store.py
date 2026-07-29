@@ -81,6 +81,7 @@ class MilvusVectorStore:
         knowledge_base_id: str,
         query_vector: list[float],
         top_k: int,
+        document_ids: list[str] | None = None,
     ) -> list[RetrievedChunk]:
         route = self._resolve(tenant)
         tenant_id = _safe_filter_id(tenant.tenant_id, "tenant_id")
@@ -88,10 +89,19 @@ class MilvusVectorStore:
         if len(query_vector) != route.embedding_dimension:
             raise ValueError("embedding dimension does not match tenant collection")
 
-        filter_expr = (
-            f'tenant_id == "{tenant_id}" and '
-            f'knowledge_base_id == "{kb_id}" and is_active == true'
-        )
+        filter_parts = [
+            f'tenant_id == "{tenant_id}"',
+            f'knowledge_base_id == "{kb_id}"',
+            "is_active == true",
+        ]
+        if document_ids:
+            safe_document_ids = [
+                _safe_filter_id(document_id, "document_id") for document_id in document_ids
+            ]
+            quoted_ids = ", ".join(f'"{document_id}"' for document_id in safe_document_ids)
+            filter_parts.append(f"document_id in [{quoted_ids}]")
+        filter_expr = " and ".join(filter_parts)
+
         params = dict(route.search_params)
         if route.index_type.upper() == "HNSW":
             params["ef"] = max(int(params.get("ef", top_k)), top_k)
@@ -111,13 +121,16 @@ class MilvusVectorStore:
         chunks: list[RetrievedChunk] = []
         for hit in results[0]:
             entity = hit.get("entity", {})
+            score = float(hit["distance"])
             chunks.append(
                 RetrievedChunk(
                     chunk_id=entity["chunk_id"],
                     document_id=entity["document_id"],
                     text="",
-                    score=float(hit["distance"]),
+                    score=score,
                     retrieval_method="vector",
+                    retrieval_methods=["vector"],
+                    scores={"vector": score},
                     source={},
                     metadata={},
                 )

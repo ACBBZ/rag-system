@@ -1,5 +1,5 @@
+from rag.retrieval.postgres_store import PostgresRetrievalStore
 from rag.schemas import RetrievedChunk, TenantContext
-from rag.storage.repositories import DocumentRepository
 
 
 class FakeMappingsResult:
@@ -46,9 +46,9 @@ async def test_full_text_search_applies_tenant_kb_document_and_metadata_filters(
             }
         ]
     )
-    repository = DocumentRepository(session)
+    store = PostgresRetrievalStore(session)
 
-    results = await repository.full_text_search(
+    results = await store.full_text_search(
         tenant(),
         "kb_1",
         "annual leave",
@@ -92,9 +92,9 @@ async def test_hydrate_chunks_preserves_candidate_order_and_filters():
             },
         ]
     )
-    repository = DocumentRepository(session)
+    store = PostgresRetrievalStore(session)
 
-    hydrated = await repository.hydrate_chunks(
+    hydrated = await store.hydrate_chunks(
         tenant(),
         "kb_1",
         [candidate("chunk_a", 0.9), candidate("chunk_b", 0.8)],

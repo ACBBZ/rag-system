@@ -11,6 +11,7 @@ from rag.errors import NotFoundError, UnauthorizedError
 from rag.ingestion.pipeline import IngestionPipeline
 from rag.models.endpoints import ModelEndpointClient
 from rag.retrieval.pipeline import RetrievalPipeline
+from rag.retrieval.postgres_store import PostgresRetrievalStore
 from rag.schemas import TenantContext
 from rag.storage.database import get_async_engine, get_sessionmaker
 from rag.storage.identity_repository import DynamicTenantRepository
@@ -41,7 +42,12 @@ async def get_session() -> AsyncIterator[AsyncSession]:
     engine = get_async_engine(settings)
     sessionmaker = get_sessionmaker(engine)
     async with sessionmaker() as session:
-        yield session
+        try:
+            yield session
+            await session.commit()
+        except BaseException:
+            await session.rollback()
+            raise
 
 
 async def get_tenant_context(
@@ -118,6 +124,6 @@ async def get_retrieval_pipeline(
     return RetrievalPipeline(
         settings=settings,
         model_client=model_client,
-        document_repository=DocumentRepository(session),
+        document_repository=PostgresRetrievalStore(session),
         vector_store=MilvusVectorStore(settings),
     )
