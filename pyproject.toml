@@ -1,6 +1,27 @@
 [project]
 name = "rag-system"
 version = "0.2.0"
+description = "Production-oriented multi-tenant RAG platform with asynchronous ingestion, hybrid retrieval, verifiable citations, RAGAS evaluation, and observability."
+readme = "README.en.md"
+license = { file = "LICENSE" }
+authors = [{ name = "ACBBZ" }]
+keywords = [
+  "rag",
+  "retrieval-augmented-generation",
+  "fastapi",
+  "milvus",
+  "postgresql",
+  "ragas",
+  "multi-tenant",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Framework :: FastAPI",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 requires-python = ">=3.11"
 dependencies = [
   "alembic>=1.13,<2",
@@ -48,6 +69,12 @@ load = ["locust>=2.31,<3"]
 [project.scripts]
 rag-worker = "rag.ingestion.worker_main:main"
 rag-eval = "rag.evaluation.runner:main"
+
+[project.urls]
+Homepage = "https://github.com/ACBBZ/rag-system"
+Repository = "https://github.com/ACBBZ/rag-system"
+Documentation = "https://github.com/ACBBZ/rag-system#readme"
+Issues = "https://github.com/ACBBZ/rag-system/issues"
 
 [build-system]
 requires = ["setuptools>=69", "wheel"]
