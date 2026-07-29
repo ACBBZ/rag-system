@@ -1,0 +1,88 @@
+name: RAG Evaluation
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: JSONL dataset path
+        required: true
+        default: evals/datasets/smoke.jsonl
+      use_ragas:
+        description: Run RAGAS LLM-as-a-judge metrics
+        required: true
+        type: boolean
+        default: true
+  schedule:
+    - cron: "0 18 * * *"
+
+jobs:
+  ragas-contract:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[dev,eval]'
+      - name: Verify RAGAS collections API
+        run: |
+          python - <<'PY'
+          from ragas.embeddings.base import embedding_factory
+          from ragas.llms import llm_factory
+          from ragas.metrics.collections import (
+              AnswerRelevancy,
+              ContextPrecision,
+              ContextRecall,
+              FactualCorrectness,
+              Faithfulness,
+          )
+
+          assert embedding_factory
+          assert llm_factory
+          assert AnswerRelevancy
+          assert ContextPrecision
+          assert ContextRecall
+          assert FactualCorrectness
+          assert Faithfulness
+          PY
+      - run: pytest tests/test_evaluation_metrics.py -v
+
+  evaluate:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'schedule' && vars.ENABLE_RAG_EVAL == 'true') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[dev,eval]'
+      - name: Run evaluation
+        env:
+          RAG_EVAL_BASE_URL: ${{ secrets.RAG_EVAL_BASE_URL }}
+          RAG_EVAL_API_KEY: ${{ secrets.RAG_EVAL_API_KEY }}
+          RAGAS_EVALUATOR_API_KEY: ${{ secrets.RAGAS_EVALUATOR_API_KEY }}
+          RAGAS_EVALUATOR_BASE_URL: ${{ secrets.RAGAS_EVALUATOR_BASE_URL }}
+          RAGAS_EVALUATOR_MODEL: ${{ vars.RAGAS_EVALUATOR_MODEL }}
+          RAGAS_EVALUATOR_EMBEDDING_MODEL: ${{ vars.RAGAS_EVALUATOR_EMBEDDING_MODEL }}
+        run: |
+          DATASET="${{ inputs.dataset || 'evals/datasets/smoke.jsonl' }}"
+          EXTRA_ARGS=""
+          if [ "${{ inputs.use_ragas || 'true' }}" = "true" ]; then
+            EXTRA_ARGS="--ragas"
+          fi
+          python -m rag.evaluation.runner \
+            --dataset "$DATASET" \
+            --output evals/reports/results.jsonl \
+            $EXTRA_ARGS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rag-evaluation-results
+          path: evals/reports/results.jsonl

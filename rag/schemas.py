@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -134,6 +135,7 @@ class KnowledgeBaseMemberRequest(BaseModel):
 
 
 class RetrievalOptions(BaseModel):
+    retrieval_mode: Literal["vector", "full_text", "hybrid", "auto"] | None = None
     query_rewrite: bool | None = None
     vector_search: bool | None = None
     full_text_search: bool | None = None
@@ -155,6 +157,8 @@ class RetrievedChunk(BaseModel):
     text: str
     score: float
     retrieval_method: str
+    retrieval_methods: list[str] = Field(default_factory=list)
+    scores: dict[str, float] = Field(default_factory=dict)
     source: dict[str, str | int | None]
     metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
 
@@ -183,6 +187,7 @@ class RetrievalSearchRequest(BaseModel):
 class RetrievalSearchResponse(BaseModel):
     query_id: str
     rewritten_query: str | None = None
+    effective_options: dict[str, object] | None = None
     chunks: list[RetrievedChunk]
     answer: str | None = None
     citations: list[Citation] = Field(default_factory=list)
