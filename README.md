@@ -10,7 +10,7 @@
 
 <p align="center">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-blue">
-  <img alt="License" src="https://img.shields.io/badge/License-MIT-green">
+  <img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-green">
   <img alt="CI" src="https://github.com/ACBBZ/rag-system/actions/workflows/ci.yml/badge.svg">
 </p>
 
@@ -469,4 +469,4 @@ pytest -v
 
 ## 许可证
 
-本项目基于 [MIT License](LICENSE) 开源。
+本项目基于 [Apache License 2.0](LICENSE) 开源。
