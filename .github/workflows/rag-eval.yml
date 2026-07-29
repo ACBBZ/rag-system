@@ -1,6 +1,7 @@
 name: RAG Evaluation
 
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       dataset:
@@ -16,8 +17,44 @@ on:
     - cron: "0 18 * * *"
 
 jobs:
+  ragas-contract:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[dev,eval]'
+      - name: Verify RAGAS collections API
+        run: |
+          python - <<'PY'
+          from ragas.embeddings.base import embedding_factory
+          from ragas.llms import llm_factory
+          from ragas.metrics.collections import (
+              AnswerRelevancy,
+              ContextPrecision,
+              ContextRecall,
+              FactualCorrectness,
+              Faithfulness,
+          )
+
+          assert embedding_factory
+          assert llm_factory
+          assert AnswerRelevancy
+          assert ContextPrecision
+          assert ContextRecall
+          assert FactualCorrectness
+          assert Faithfulness
+          PY
+      - run: pytest tests/test_evaluation_metrics.py -v
+
   evaluate:
-    if: ${{ secrets.RAG_EVAL_API_KEY != '' }}
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'schedule' && vars.ENABLE_RAG_EVAL == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
