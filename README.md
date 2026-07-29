@@ -65,7 +65,7 @@ RAG System 是一个基于 FastAPI、PostgreSQL、MinIO 和 Milvus 构建的多�
 - RAGAS Faithfulness、Answer Relevancy、Context Precision、Context Recall 和 Factual Correctness；
 - Golden、Smoke 和 Adversarial 数据集；
 - Baseline 比较和 CI 质量门禁；
-- Prometheus 指标、OpenTelemetry spans、Query/ Retrieval 日志；
+- Prometheus 指标、OpenTelemetry spans、Query / Retrieval 日志；
 - `/health/live`、`/health/ready` 和 `/metrics`。
 
 ## 架构
@@ -103,6 +103,99 @@ FastAPI API
 
 rag-worker
   └── 解析 → 切分 → Embedding → 索引 → 校验 → 激活
+```
+
+## 端到端工作流程
+
+系统包含三条相互连接的主流程：文档摄取、检索问答和质量评测。
+
+### 1. 文档摄取与版本激活
+
+1. 客户端使用租户 API Key 上传文件，API 完成身份认证、知识库 ACL 和上传限制校验。
+2. 原始文件写入 MinIO，PostgreSQL 创建文档版本和持久化摄取任务，接口返回 `202 Accepted` 与 `job_id`。
+3. `rag-worker` 使用 `FOR UPDATE SKIP LOCKED` 领取任务，并依次执行解析、OCR、清洗、结构恢复和 token-aware 切分。
+4. Worker 调用 Embedding 服务，将 Chunk 元数据和全文检索字段写入 PostgreSQL，并将向量以暂存状态写入 Milvus。
+5. 系统校验 Chunk 与向量数量、版本和索引状态；校验成功后激活新版本并失活旧版本。
+6. 可重试错误进入 `failed_retryable`，终止错误进入 `failed_terminal`；对账任务用于发现并修复跨 PostgreSQL、MinIO 和 Milvus 的残留或缺失数据。
+
+### 2. 检索、生成与引用校验
+
+1. 客户端提交问题、知识库 ID、检索选项和过滤条件，API 再次执行租户与知识库授权。
+2. 系统解析最终检索配置，并可选执行 Query Rewrite。
+3. Hybrid 模式并行运行 Milvus 向量检索和 PostgreSQL 全文检索；两路结果通过加权 RRF 融合。
+4. 候选结果经过 PostgreSQL 水合、metadata 过滤、阈值过滤、去重、单文档数量限制和 Rerank。
+5. 系统按模型上下文窗口构建 token-budgeted context，并把文档内容作为不可信数据传给 LLM。
+6. LLM 返回结构化答案和实际使用的 Chunk ID；服务端验证所有 Citation ID 必须来自本次上下文。
+7. 引用校验通过后返回答案、引用、阶段分数、耗时、`query_id` 与 `trace_id`；上下文不足时返回明确拒答状态。
+
+### 3. 评测与持续改进
+
+1. Query、Retrieval、模型版本、耗时和 token 使用量写入日志与监控系统。
+2. `rag-eval` 使用 Smoke、Golden 和 Adversarial 数据集调用真实检索 API。
+3. 系统计算确定性指标与可选 RAGAS 指标，并和主分支 baseline 比较。
+4. 租户泄漏、知识库泄漏、未知引用或显著质量回退会触发质量门禁失败。
+5. 评测结果用于调整解析、切分、检索权重、阈值、Rerank、Prompt 和模型版本。
+
+### 流程图
+
+```mermaid
+flowchart TD
+    U[租户客户端] --> A[FastAPI API<br/>认证、ACL、限流与输入校验]
+
+    subgraph INGEST[文档摄取与版本激活]
+        A -->|上传文档| I1[写入 MinIO 原始文件]
+        I1 --> I2[PostgreSQL 创建文档版本<br/>与持久化摄取任务]
+        I2 -->|202 + job_id| U
+        I2 --> I3[rag-worker 领取任务<br/>FOR UPDATE SKIP LOCKED]
+        I3 --> I4[解析 / OCR / 清洗<br/>恢复页面、标题和表格结构]
+        I4 --> I5[Token-aware 切分<br/>稳定 Chunk ID 与 Context Key]
+        I5 --> I6[Embedding 批处理]
+        I6 --> I7[PostgreSQL 写入暂存 Chunk<br/>全文检索与 Metadata]
+        I6 --> I8[Milvus 写入暂存向量]
+        I7 --> I9{Chunk、向量与版本校验}
+        I8 --> I9
+        I9 -->|通过| I10[激活新版本<br/>失活旧版本]
+        I9 -->|可重试失败| I11[failed_retryable<br/>退避后重试]
+        I9 -->|终止失败| I12[failed_terminal]
+        I11 --> I3
+        I10 --> I13[Reconciliation 对账与清理]
+        I12 --> I13
+    end
+
+    subgraph QUERY[检索、生成与可信引用]
+        A -->|问题 + 检索选项 + Filters| Q1[解析 Effective Options]
+        Q1 --> Q2{Query Rewrite?}
+        Q2 -->|是| Q3[改写查询]
+        Q2 -->|否| Q4[使用原始查询]
+        Q3 --> Q5[并行检索]
+        Q4 --> Q5
+        Q5 --> Q6[Milvus 向量检索<br/>租户、知识库与 Metadata 前置过滤]
+        Q5 --> Q7[PostgreSQL 全文检索]
+        Q6 --> Q8[加权 RRF 融合]
+        Q7 --> Q8
+        Q8 --> Q9[水合、阈值、去重<br/>单文档限制与 Rerank]
+        Q9 --> Q10{有足够上下文?}
+        Q10 -->|否| Q11[返回 insufficient_context]
+        Q10 -->|是| Q12[按 Token Budget 构建 Context]
+        Q12 --> Q13[LLM 生成结构化答案<br/>与 cited_chunk_ids]
+        Q13 --> Q14{Citation ID 全部有效?}
+        Q14 -->|否| Q15[生成校验失败<br/>不返回伪造引用]
+        Q14 -->|是| Q16[返回答案、引用、分数<br/>query_id 与 trace_id]
+    end
+
+    subgraph EVAL[可观测性与评测闭环]
+        Q11 --> E1[Query / Retrieval Logs<br/>Metrics / Traces]
+        Q15 --> E1
+        Q16 --> E1
+        I10 --> E1
+        E2[Smoke / Golden / Adversarial 数据集] --> E3[rag-eval 调用真实 API]
+        E3 --> E4[确定性指标 + RAGAS]
+        E4 --> E5{Baseline 与硬门禁}
+        E5 -->|通过| E6[允许发布或继续部署]
+        E5 -->|失败| E7[阻止回退并输出失败样本]
+        E7 --> E8[调整解析、切分、检索参数<br/>Prompt 与模型版本]
+        E8 --> E2
+    end
 ```
 
 ## 技术栈
