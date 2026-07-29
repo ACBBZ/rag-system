@@ -61,7 +61,7 @@ def tenant_route() -> TenantVectorRoute:
     )
 
 
-def test_collection_names_are_stable_fixed_v1_and_do_not_expose_tenant_identity():
+def test_collection_names_are_stable_v2_and_do_not_expose_tenant_identity():
     first = build_collection_names("ten_acme-customer", "rag_prod")
     second = build_collection_names("ten_acme-customer", "rag_prod")
     other = build_collection_names("ten_other-customer", "rag_prod")
@@ -71,19 +71,17 @@ def test_collection_names_are_stable_fixed_v1_and_do_not_expose_tenant_identity(
     assert "acme" not in first.alias
     assert "customer" not in first.physical
     assert first.alias.endswith("_current")
-    assert first.physical.endswith("_v1")
+    assert first.physical.endswith("_v2")
 
 
 def test_authenticated_tenant_uses_database_loaded_alias():
     route = tenant_route()
     tenant = TenantContext(tenant_id="ten_a", user_id="usr_a", vector_route=route)
-
     assert TenantCollectionResolver().resolve(tenant) == route
 
 
 def test_tenant_without_ready_vector_resource_is_unavailable():
     tenant = TenantContext(tenant_id="ten_a", user_id="usr_a")
-
     with pytest.raises(ServiceUnavailableError, match="vector collection is not ready"):
         TenantCollectionResolver().resolve(tenant)
 
@@ -97,9 +95,7 @@ async def test_upsert_uses_tenant_alias_and_keeps_tenant_metadata():
         user_id="usr_a",
         vector_route=tenant_route(),
     )
-
     await store.upsert_chunks(tenant, "kb_a", "doc_a", ["chk_a"], [[0.1, 0.2]])
-
     assert len(client.upserts) == 1
     assert client.upserts[0]["collection_name"] == "rag_prod_t_abc_current"
     assert client.upserts[0]["data"][0]["tenant_id"] == "ten_a"
@@ -116,9 +112,7 @@ async def test_search_uses_route_search_configuration_and_defense_in_depth_filte
         user_id="usr_a",
         vector_route=tenant_route(),
     )
-
     await store.search(tenant, "kb_a", [0.1, 0.2], 5)
-
     call = client.searches[0]
     assert call["collection_name"] == "rag_prod_t_abc_current"
     assert call["search_params"] == {
@@ -138,9 +132,7 @@ async def test_delete_uses_alias_and_tenant_knowledge_base_document_filters():
         user_id="usr_a",
         vector_route=tenant_route(),
     )
-
     await store.delete_document(tenant, "kb_a", "doc_a")
-
     assert len(client.deletes) == 1
     call = client.deletes[0]
     assert call["collection_name"] == "rag_prod_t_abc_current"

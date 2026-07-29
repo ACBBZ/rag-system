@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: rag
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  minio:
+    image: minio/minio:RELEASE.2024-07-16T23-46-41Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniopass
+  milvus:
+    image: milvusdb/milvus:v2.4.6
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_USE_EMBED: "true"
+      COMMON_STORAGETYPE: local
+  api:
+    build: .
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    env_file: .env.integration
+    depends_on: [postgres, minio, milvus]
+    ports: ["8000:8000"]
+  worker:
+    build: .
+    command: rag-worker
+    env_file: .env.integration
+    depends_on: [api]

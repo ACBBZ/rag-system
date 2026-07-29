@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  unit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,4 +17,55 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[dev]'
       - run: ruff check .
-      - run: pytest -v
+      - run: pytest -v -m 'not integration'
+
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: rag
+          POSTGRES_USER: rag
+          POSTGRES_PASSWORD: rag
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rag -d rag"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      POSTGRES_DSN: postgresql+asyncpg://rag:rag@localhost:5432/rag
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[dev]'
+      - run: alembic upgrade head
+      - run: alembic downgrade 0004_retrieval_v2
+      - run: alembic upgrade head
+
+  recovery-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e '.[dev]'
+      - run: pytest tests/integration/test_failure_recovery.py -v
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: rag-system:ci

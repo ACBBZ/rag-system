@@ -12,6 +12,7 @@ class TenantVectorRoute(BaseModel):
     metric_type: str
     index_type: str
     search_params: dict[str, object] = Field(default_factory=dict)
+    schema_version: int = 1
 
 
 class TenantContext(BaseModel):
@@ -36,7 +37,11 @@ class TenantContext(BaseModel):
         return True
 
     def has_scope(self, scope: str) -> bool:
-        limits = self.scope_limit if self.scope_limit is not None else self.allowed_scopes
+        limits = (
+            self.scope_limit
+            if self.scope_limit is not None
+            else self.allowed_scopes
+        )
         return scope in limits if limits else False
 
 
@@ -83,7 +88,10 @@ class CreateTenantRequest(BaseModel):
     slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,62}$")
     owner_email: str = Field(min_length=3, max_length=320)
     owner_display_name: str | None = Field(default=None, max_length=200)
-    default_knowledge_base_name: str | None = Field(default="Default", max_length=200)
+    default_knowledge_base_name: str | None = Field(
+        default="Default",
+        max_length=200,
+    )
 
 
 class CreateTenantResponse(BaseModel):
@@ -142,8 +150,16 @@ class RetrievalOptions(BaseModel):
     hybrid_search: bool | None = None
     rerank: bool | None = None
     agent_search: bool | None = None
-    top_k: int = Field(default=20, ge=1, le=100)
-    final_k: int = Field(default=5, ge=1, le=50)
+    top_k: int = Field(default=20, ge=1, le=500)
+    final_k: int = Field(default=5, ge=1, le=100)
+    vector_weight: float | None = Field(default=None, ge=0)
+    lexical_weight: float | None = Field(default=None, ge=0)
+    rrf_k: int | None = Field(default=None, ge=1, le=1000)
+    rerank_candidate_k: int | None = Field(default=None, ge=1, le=500)
+    per_document_limit: int | None = Field(default=None, ge=1, le=100)
+    score_threshold: float | None = None
+    include_diagnostics: bool = False
+    allow_partial_results: bool = False
 
 
 class RetrievalFilters(BaseModel):
@@ -156,11 +172,12 @@ class RetrievedChunk(BaseModel):
     document_id: str
     text: str
     score: float
+    final_score_type: str | None = None
     retrieval_method: str
     retrieval_methods: list[str] = Field(default_factory=list)
     scores: dict[str, float] = Field(default_factory=dict)
     source: dict[str, str | int | None]
-    metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+    metadata: dict[str, object] = Field(default_factory=dict)
 
 
 class Citation(BaseModel):
@@ -172,6 +189,13 @@ class Citation(BaseModel):
     quote: str
 
 
+class GeneratedAnswer(BaseModel):
+    answer: str | None
+    cited_chunk_ids: list[str] = Field(default_factory=list)
+    abstained: bool = False
+    abstention_reason: str | None = None
+
+
 class Usage(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -179,24 +203,37 @@ class Usage(BaseModel):
 
 class RetrievalSearchRequest(BaseModel):
     knowledge_base_id: str
-    query: str = Field(min_length=1)
+    query: str = Field(min_length=1, max_length=20_000)
     options: RetrievalOptions = Field(default_factory=RetrievalOptions)
     filters: RetrievalFilters = Field(default_factory=RetrievalFilters)
 
 
 class RetrievalSearchResponse(BaseModel):
     query_id: str
+    trace_id: str | None = None
     rewritten_query: str | None = None
     effective_options: dict[str, object] | None = None
     chunks: list[RetrievedChunk]
     answer: str | None = None
+    answer_status: Literal[
+        "not_requested",
+        "answered",
+        "insufficient_context",
+        "conflicting_context",
+        "generation_failed",
+    ] = "not_requested"
+    abstention_reason: str | None = None
     citations: list[Citation] = Field(default_factory=list)
     usage: Usage | None = None
+    timings: dict[str, float] = Field(default_factory=dict)
+    degraded: bool = False
+    degraded_components: list[str] = Field(default_factory=list)
 
 
 class EmbedDocumentResponse(BaseModel):
     job_id: str
     document_id: str
+    version: int = 1
     status: str
 
 
@@ -210,3 +247,18 @@ class UpdateDocumentResponse(BaseModel):
 class PurgeDocumentResponse(BaseModel):
     document_id: str
     status: str
+
+
+class IngestionJobResponse(BaseModel):
+    job_id: str
+    document_id: str | None = None
+    document_version: int | None = None
+    status: str
+    stage: str | None = None
+    progress: float = 0.0
+    attempt: int = 0
+    max_attempts: int = 3
+    error_code: str | None = None
+    error_message: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None

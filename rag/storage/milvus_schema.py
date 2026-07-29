@@ -9,7 +9,7 @@ from pymilvus import DataType, MilvusClient
 
 from rag.config import Settings
 
-TENANT_VECTOR_SCHEMA_VERSION = 1
+TENANT_VECTOR_SCHEMA_VERSION = 2
 _SAFE_PREFIX = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,31}$")
 
 
@@ -63,9 +63,17 @@ def schema_fingerprint(settings: Settings) -> str:
             ["chunk_id", "VARCHAR", 256],
             ["document_version", "INT64", None],
             ["is_active", "BOOL", None],
+            ["language", "VARCHAR", 32],
+            ["page_start", "INT64", None],
+            ["page_end", "INT64", None],
+            ["metadata", "JSON", None],
         ],
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -79,17 +87,53 @@ def build_collection_schema(dimension: int):
         is_primary=True,
         max_length=256,
     )
-    schema.add_field(field_name="vector", datatype=DataType.FLOAT_VECTOR, dim=dimension)
-    schema.add_field(field_name="tenant_id", datatype=DataType.VARCHAR, max_length=128)
+    schema.add_field(
+        field_name="vector",
+        datatype=DataType.FLOAT_VECTOR,
+        dim=dimension,
+    )
+    schema.add_field(
+        field_name="tenant_id",
+        datatype=DataType.VARCHAR,
+        max_length=128,
+    )
     schema.add_field(
         field_name="knowledge_base_id",
         datatype=DataType.VARCHAR,
         max_length=128,
     )
-    schema.add_field(field_name="document_id", datatype=DataType.VARCHAR, max_length=128)
-    schema.add_field(field_name="chunk_id", datatype=DataType.VARCHAR, max_length=256)
+    schema.add_field(
+        field_name="document_id",
+        datatype=DataType.VARCHAR,
+        max_length=128,
+    )
+    schema.add_field(
+        field_name="chunk_id",
+        datatype=DataType.VARCHAR,
+        max_length=256,
+    )
     schema.add_field(field_name="document_version", datatype=DataType.INT64)
     schema.add_field(field_name="is_active", datatype=DataType.BOOL)
+    schema.add_field(
+        field_name="language",
+        datatype=DataType.VARCHAR,
+        max_length=32,
+    )
+    schema.add_field(
+        field_name="page_start",
+        datatype=DataType.INT64,
+        nullable=True,
+    )
+    schema.add_field(
+        field_name="page_end",
+        datatype=DataType.INT64,
+        nullable=True,
+    )
+    schema.add_field(
+        field_name="metadata",
+        datatype=DataType.JSON,
+        nullable=True,
+    )
     return schema
 
 
