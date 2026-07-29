@@ -47,40 +47,95 @@ def upgrade() -> None:
         server_default=sa.text("'[]'::jsonb"),
         postgresql_using="title_path::jsonb",
     )
-    op.add_column("chunks", sa.Column("ordinal", sa.Integer(), nullable=False, server_default="1"))
-    op.add_column("chunks", sa.Column("content_hash", sa.String(), nullable=False, server_default=""))
+    op.add_column(
+        "chunks",
+        sa.Column("ordinal", sa.Integer(), nullable=False, server_default="1"),
+    )
+    op.add_column(
+        "chunks",
+        sa.Column("content_hash", sa.String(), nullable=False, server_default=""),
+    )
     op.add_column("chunks", sa.Column("context_key", sa.String(), nullable=True))
     op.add_column("chunks", sa.Column("parent_chunk_id", sa.String(), nullable=True))
     op.add_column("chunks", sa.Column("page_start", sa.Integer(), nullable=True))
     op.add_column("chunks", sa.Column("page_end", sa.Integer(), nullable=True))
-    op.add_column("chunks", sa.Column("language", sa.String(), nullable=False, server_default="und"))
-    op.add_column("chunks", sa.Column("parser_version", sa.String(), nullable=False, server_default="v1"))
-    op.add_column("chunks", sa.Column("chunker_version", sa.String(), nullable=False, server_default="v1"))
-    op.add_column("chunks", sa.Column("lexical_text", sa.Text(), nullable=False, server_default=""))
+    op.add_column(
+        "chunks",
+        sa.Column("language", sa.String(), nullable=False, server_default="und"),
+    )
+    op.add_column(
+        "chunks",
+        sa.Column("parser_version", sa.String(), nullable=False, server_default="v1"),
+    )
+    op.add_column(
+        "chunks",
+        sa.Column("chunker_version", sa.String(), nullable=False, server_default="v1"),
+    )
+    op.add_column(
+        "chunks",
+        sa.Column("lexical_text", sa.Text(), nullable=False, server_default=""),
+    )
+    op.execute(
+        """
+        with ranked as (
+            select id,
+                   row_number() over (
+                       partition by tenant_id, knowledge_base_id,
+                                    document_id, document_version
+                       order by created_at, id
+                   ) as ordinal_value
+            from chunks
+        )
+        update chunks as c
+        set ordinal = ranked.ordinal_value
+        from ranked
+        where c.id = ranked.id
+        """
+    )
     op.create_unique_constraint(
         "uq_chunks_scope_ordinal",
         "chunks",
         ["tenant_id", "knowledge_base_id", "document_id", "document_version", "ordinal"],
     )
-    op.create_index("uq_chunks_context_key", "chunks", ["context_key"], unique=True)
+    op.create_index(
+        "uq_chunks_context_key",
+        "chunks",
+        ["context_key"],
+        unique=True,
+    )
     job_columns = [
         sa.Column("document_version", sa.Integer(), nullable=True),
         sa.Column("stage", sa.String(), nullable=False, server_default="queued"),
         sa.Column("progress", sa.Float(), nullable=False, server_default="0"),
         sa.Column("attempt", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("max_attempts", sa.Integer(), nullable=False, server_default="3"),
-        sa.Column("available_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "available_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("heartbeat_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("worker_id", sa.String(), nullable=True),
         sa.Column("error_code", sa.String(), nullable=True),
         sa.Column("error_message", sa.Text(), nullable=True),
-        sa.Column("error_details", postgresql.JSONB(), nullable=False, server_default=sa.text("'{}'::jsonb")),
+        sa.Column(
+            "error_details",
+            postgresql.JSONB(),
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
+        ),
         sa.Column("idempotency_key", sa.String(), nullable=True),
         sa.Column("raw_object_key", sa.String(), nullable=True),
         sa.Column("filename", sa.String(), nullable=True),
-        sa.Column("metadata", postgresql.JSONB(), nullable=False, server_default=sa.text("'{}'::jsonb")),
+        sa.Column(
+            "metadata",
+            postgresql.JSONB(),
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
+        ),
     ]
     for column in job_columns:
         op.add_column("ingestion_jobs", column)
@@ -98,19 +153,44 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index("ix_ingestion_jobs_claim", table_name="ingestion_jobs")
-    op.drop_constraint("uq_ingestion_job_idempotency", "ingestion_jobs", type_="unique")
+    op.drop_constraint(
+        "uq_ingestion_job_idempotency",
+        "ingestion_jobs",
+        type_="unique",
+    )
     for name in [
-        "metadata", "filename", "raw_object_key", "idempotency_key", "error_details",
-        "error_message", "error_code", "worker_id", "heartbeat_at", "completed_at",
-        "started_at", "available_at", "max_attempts", "attempt", "progress", "stage",
+        "metadata",
+        "filename",
+        "raw_object_key",
+        "idempotency_key",
+        "error_details",
+        "error_message",
+        "error_code",
+        "worker_id",
+        "heartbeat_at",
+        "completed_at",
+        "started_at",
+        "available_at",
+        "max_attempts",
+        "attempt",
+        "progress",
+        "stage",
         "document_version",
     ]:
         op.drop_column("ingestion_jobs", name)
     op.drop_index("uq_chunks_context_key", table_name="chunks")
     op.drop_constraint("uq_chunks_scope_ordinal", "chunks", type_="unique")
     for name in [
-        "lexical_text", "chunker_version", "parser_version", "language", "page_end",
-        "page_start", "parent_chunk_id", "context_key", "content_hash", "ordinal",
+        "lexical_text",
+        "chunker_version",
+        "parser_version",
+        "language",
+        "page_end",
+        "page_start",
+        "parent_chunk_id",
+        "context_key",
+        "content_hash",
+        "ordinal",
     ]:
         op.drop_column("chunks", name)
     op.alter_column(
@@ -122,7 +202,11 @@ def downgrade() -> None:
         server_default=sa.text("'[]'::json"),
         postgresql_using="title_path::json",
     )
-    op.drop_constraint("uq_document_versions_scope_version", "document_versions", type_="unique")
+    op.drop_constraint(
+        "uq_document_versions_scope_version",
+        "document_versions",
+        type_="unique",
+    )
     op.drop_column("document_versions", "filename")
     op.drop_column("document_versions", "status")
     op.alter_column(
