@@ -38,8 +38,8 @@ async def build_ragas_metrics() -> dict[str, Any]:
             AnswerRelevancy,
             ContextPrecision,
             ContextRecall,
-            Faithfulness,
             FactualCorrectness,
+            Faithfulness,
         )
     except ImportError as exc:
         raise RuntimeError("install the evaluation dependencies with '.[eval]'") from exc
@@ -159,23 +159,22 @@ async def run(args: argparse.Namespace) -> None:
     cases = load_jsonl(args.dataset)
     ragas_metrics = await build_ragas_metrics() if args.ragas else None
     async with RAGApiClient(args.base_url, args.api_key) as client:
-        results = [
-            await evaluate_case(client, case, ragas_metrics)
-            for case in cases
-        ]
+        results = [await evaluate_case(client, case, ragas_metrics) for case in cases]
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as handle:
         for result in results:
             handle.write(json.dumps(result, ensure_ascii=False) + "\n")
 
-    metric_names = sorted(
-        {name for result in results for name in result["metrics"]}
+    metric_names = sorted({name for result in results for name in result["metrics"]})
+    summary = (
+        {
+            name: sum(result["metrics"].get(name, 0.0) for result in results) / len(results)
+            for name in metric_names
+        }
+        if results
+        else {}
     )
-    summary = {
-        name: sum(result["metrics"].get(name, 0.0) for result in results) / len(results)
-        for name in metric_names
-    } if results else {}
     print(json.dumps({"cases": len(results), "metrics": summary}, ensure_ascii=False, indent=2))
 
 
@@ -183,7 +182,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate the RAG API with JSONL cases")
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=Path("evals/reports/results.jsonl"))
-    parser.add_argument("--base-url", default=os.environ.get("RAG_EVAL_BASE_URL", "http://localhost:8000"))
+    parser.add_argument(
+        "--base-url",
+        default=os.environ.get("RAG_EVAL_BASE_URL", "http://localhost:8000"),
+    )
     parser.add_argument("--api-key", default=os.environ.get("RAG_EVAL_API_KEY"), required=False)
     parser.add_argument("--ragas", action="store_true")
     args = parser.parse_args()

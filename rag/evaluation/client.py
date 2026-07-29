@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Self
 
 import httpx
 
@@ -42,7 +42,7 @@ class RAGApiClient:
         if self._owns_client:
             await self.client.aclose()
 
-    async def __aenter__(self) -> "RAGApiClient":
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type, exc, traceback) -> None:
