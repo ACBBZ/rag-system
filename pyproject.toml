@@ -29,6 +29,10 @@ dev = [
   "respx>=0.21",
   "ruff>=0.5",
 ]
+eval = [
+  "openai>=1.0",
+  "ragas==0.4.3",
+]
 
 [build-system]
 requires = ["setuptools>=69", "wheel"]
@@ -39,6 +43,7 @@ packages = [
   "app",
   "app.api",
   "rag",
+  "rag.evaluation",
   "rag.ingestion",
   "rag.models",
   "rag.retrieval",
@@ -55,4 +60,7 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint.per-file-ignores]
-"rag/storage/repositories.py" = ["F401"]
+"rag/authz.py" = ["SIM102"]
+"rag/storage/milvus_collection_manager.py" = ["BLE001"]
+"rag/storage/repositories.py" = ["F401", "I001"]
+"rag/storage/vector_resources.py" = ["UP037"]
